@@ -81,3 +81,67 @@ export async function setAllMtimes(dir, date) {
   }
   await fs.utimes(dir, date, date);
 }
+
+function gitIn(cwd) {
+  return (...args) => execFileSync('git', args, {cwd, stdio: 'pipe', encoding: 'utf8'});
+}
+
+/**
+ * A bare origin and a clone of it with one commit on `main`, pushed,
+ * and `origin/HEAD` pointing at `origin/main`. Returns {repo, origin}.
+ */
+export async function gitRepoWithOrigin() {
+  const root = await tmpdir();
+  const origin = path.join(root, 'origin.git');
+  const repo = path.join(root, 'repo');
+  await fs.mkdir(origin);
+  await fs.mkdir(repo);
+  gitIn(origin)('init', '-q', '--bare', '-b', 'main');
+  const git = gitIn(repo);
+  git('init', '-q', '-b', 'main');
+  git('config', 'user.name', 'Test');
+  git('config', 'user.email', 'test@example.com');
+  git('config', 'commit.gpgsign', 'false');
+  await writeTree(repo, {'README.md': 'hello\n'});
+  git('add', '-A');
+  git('commit', '-q', '-m', 'init');
+  git('remote', 'add', 'origin', origin);
+  git('push', '-q', 'origin', 'main');
+  git('remote', 'set-head', 'origin', 'main');
+  return {repo, origin};
+}
+
+/**
+ * Adds a worktree on a new branch (from main) under `<repo>/.claude/worktrees/<name>`,
+ * name = branch with `/` replaced by `-`. Returns the worktree path.
+ * opts: commit (one commit on the branch), push (push the branch),
+ * mergeIntoMainAndPush, cherryPickIntoMainAndPush, untracked (file name to leave
+ * untracked), lock, detach (detached HEAD at main instead of a branch).
+ */
+export async function addWorktree(repo, branch, opts = {}) {
+  const name = branch.replace(/\//g, '-');
+  const wt = path.join(repo, '.claude', 'worktrees', name);
+  const git = gitIn(repo);
+  if (opts.detach) git('worktree', 'add', '-q', '--detach', wt, 'main');
+  else git('worktree', 'add', '-q', '-b', branch, wt, 'main');
+  const wgit = gitIn(wt);
+  if (opts.commit) {
+    await writeTree(wt, {[`${name}.txt`]: `${branch}\n`});
+    wgit('add', '-A');
+    wgit('commit', '-q', '-m', `work on ${branch}`);
+  }
+  if (opts.push) wgit('push', '-q', 'origin', branch);
+  if (opts.mergeIntoMainAndPush) {
+    git('merge', '-q', '--no-ff', '-m', `merge ${branch}`, branch);
+    git('push', '-q', 'origin', 'main');
+  }
+  if (opts.cherryPickIntoMainAndPush) {
+    // main moves on first, so the picked commit gets a new hash and the branch is no ancestor.
+    git('commit', '-q', '--allow-empty', '-m', 'main moves on');
+    git('cherry-pick', branch);
+    git('push', '-q', 'origin', 'main');
+  }
+  if (opts.untracked) await writeTree(wt, {[opts.untracked]: 'untracked\n'});
+  if (opts.lock) git('worktree', 'lock', wt);
+  return wt;
+}

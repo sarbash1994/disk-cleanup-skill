@@ -270,3 +270,21 @@ test('an incomplete recency scan counts as in use', async () => {
   assert.equal(rowAt(rows, ghost).reason.key, 'reason.git_busy');
   assert.equal(rowAt(await collect(later(), [repo]), wt).tag, 'safe', 'safe with the default limit');
 });
+
+test('branch count includes ancestor-landed and cherry-landed branches, not unlanded or open-PR ones', async () => {
+  const {repo} = await gitRepoWithOrigin();
+  await addWorktree(repo, 'feat/wt', {commit: true, mergeIntoMainAndPush: true});
+  const cp = await addWorktree(repo, 'feat/cp', {commit: true, cherryPickIntoMainAndPush: true});
+  git(repo, 'worktree', 'remove', '--force', cp);
+  git(repo, 'branch', 'feat/anc');
+  git(repo, 'branch', 'feat/anc-open');
+  git(repo, 'switch', '-q', '-c', 'feat/unlanded');
+  await writeTree(repo, {'u.txt': 'u'});
+  git(repo, 'add', 'u.txt');
+  git(repo, 'commit', '-q', '-m', 'u');
+  git(repo, 'switch', '-q', 'main');
+  const run = withPrs([{number: 7, state: 'OPEN', headRefName: 'feat/anc-open'}]);
+  const rows = await collect(later({run}), [repo]);
+  const count = rows.find(r => r.reason.key === 'reason.git_branch_count');
+  assert.deepEqual(count.reason.params, {count: 2});
+});

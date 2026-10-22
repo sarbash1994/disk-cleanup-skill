@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Before any fs work: Node's default pool of 4 threads caps every directory walk.
+process.env.UV_THREADPOOL_SIZE ??= '16';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,7 +19,7 @@ import * as agents from './lib/collect/agents.mjs';
 import * as heavy from './lib/collect/heavy.mjs';
 
 const USAGE = 'Usage: node scan.mjs <strings|report|delete>';
-const MEASURE_PARALLEL = 4;
+const MEASURE_PARALLEL = 8;
 const MEASURE_TIMEOUT_MS = 60_000;
 const DAY_MS = 86_400_000;
 

@@ -316,10 +316,20 @@ async function countLandedBranches(repo, worktrees, opts, ctx) {
   const res = await ctx.run('git', ['for-each-ref', '--format=%(refname)', 'refs/heads/'], {cwd: repo});
   if (res.code !== 0) return 0;
   const checkedOut = new Set(worktrees.map((wt) => wt.branch).filter(Boolean));
+  const names = (text) => text.split(/\r?\n/).map((l) => l.trim().replace(/^refs\/heads\//, '')).filter(Boolean);
+  const branches = names(res.stdout).filter((b) => !checkedOut.has(b));
+  // One call finds every ancestor-landed branch; only the rest need the per-branch checks.
+  const merged = await ctx.run('git', ['branch', '--merged', opts.base, '--format=%(refname)'], {cwd: repo});
+  const ancestors = new Set(merged.code === 0 ? names(merged.stdout) : []);
+  const defaultBranch = opts.base.slice(opts.base.indexOf('/') + 1);
   let count = 0;
-  for (const line of res.stdout.split(/\r?\n/)) {
-    const branch = line.trim().replace(/^refs\/heads\//, '');
-    if (!branch || checkedOut.has(branch)) continue;
+  for (const branch of branches) {
+    if (ancestors.has(branch)) {
+      // An ancestor is also cherry-landed, so only the current/default and open-PR keeps apply.
+      const open = (opts.prs ?? []).some((p) => p && p.headRefName === branch && p.state === 'OPEN');
+      if (branch !== defaultBranch && branch !== opts.current && !open) count++;
+      continue;
+    }
     const info = await classifyBranch(repo, branch, opts, ctx);
     if (info.landed && !info.keep) count++;
   }

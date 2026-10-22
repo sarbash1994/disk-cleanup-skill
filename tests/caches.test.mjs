@@ -129,6 +129,27 @@ test('pip cache: python3 on posix, py launcher on win32', async () => {
   assert.deepEqual(win.map(r => r.action), [{type: 'cmd', cmd: 'py', args: ['-m', 'pip', 'cache', 'purge']}]);
 });
 
+test('cache lookups run in the home folder; cleanCommands lists exactly what rows carry', async () => {
+  const dir = await tmpdir();
+  const cwds = [];
+  const run = async (cmd, args, opts) => { cwds.push(opts?.cwd); return {code: 0, stdout: dir + '\n', stderr: ''}; };
+  for (const platform of ['linux', 'win32']) {
+    const ctx = fakeCtx({run, platform});
+    const rows = await caches.collect(ctx);
+    assert.equal(cwds.length, 4);
+    assert.ok(cwds.every((c) => c === ctx.home));
+    cwds.length = 0;
+    const actions = rows.filter(r => r.action.type === 'cmd').map(r => ({cmd: r.action.cmd, args: r.action.args}));
+    assert.deepEqual(actions, caches.cleanCommands(platform));
+  }
+});
+
+test('bun cache row carries the real path the report saw', async () => {
+  const home = await tmpdir(); await writeTree(home, {'.bun/install/cache/a': '1'});
+  const [row] = await caches.collect(fakeCtx({home}));
+  assert.equal(row.real, path.join(home, '.bun', 'install', 'cache'));
+});
+
 test('new reason keys exist in EN', () => {
   for (const k of ['reason.pnpm_prune', 'reason.cache_clean', 'reason.browser_newest', 'reason.browser_old']) assert.ok(EN[k], k);
 });

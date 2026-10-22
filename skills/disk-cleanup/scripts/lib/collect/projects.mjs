@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import {makeRow} from '../row.mjs';
+import {makeRow, withReal} from '../row.mjs';
 import {newestMtime} from '../walk.mjs';
 
 const DAY_MS = 86_400_000;
@@ -113,5 +113,5 @@ async function collectRepo(ctx, repo) {
 export async function collect(ctx, repos) {
   const rows = [];
   for (const repo of repos) rows.push(...await collectRepo(ctx, repo));
-  return rows;
+  return withReal(rows);
 }

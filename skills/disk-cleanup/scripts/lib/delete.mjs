@@ -4,10 +4,13 @@ import {EN, t} from './strings.mjs';
 import {measureSize} from './walk.mjs';
 import {agentDirRepo, checkOrphan, checkWorktree, isKnownWorktree, listWorktrees, repoContext} from './collect/git.mjs';
 import {checkAgentTemp} from './collect/agents.mjs';
+import {cleanCommands} from './collect/caches.mjs';
 
 const MAX_IDS = 10_000;
 const CMD_TIMEOUT_MS = 600_000;
 const FETCH_TIMEOUT_MS = 120_000;
+// A fetch must never wait for a password or open a credential window.
+const FETCH_ENV = {GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never'};
 const MEASURE_TIMEOUT_MS = 120_000;
 
 /**
@@ -48,6 +51,50 @@ const LONG_PATH = /filename too long|name too long/i;
 // Fresh `safe` may go; fresh `ask` only when the user saw `ask` too; anything else changed under them.
 const stillDeletable = (fresh, seen) => fresh === 'safe' || (fresh === 'ask' && seen === 'ask');
 const changed = (check) => msg('delete.changed', {reason: msg(check.reasonKey, check.params)});
+
+// Group and reason pairs the collectors give rm rows; any other rm row did not come from this tool.
+const RM_REASONS = {
+  projects: ['reason.nm_old', 'reason.nm_recent', 'reason.build_ignored',
+    'reason.git_orphan', 'reason.git_orphan_repo', 'reason.git_loose_log'],
+  caches: ['reason.cache_clean'],
+  browsers: ['reason.browser_old', 'reason.browser_newest'],
+  agents: ['reason.agent_old', 'reason.agent_busy'],
+};
+
+/** True when a collector could have produced this row's action: the report file is not trusted. */
+function fromTool(row, platform) {
+  const action = row.action ?? {type: 'none'};
+  if (action.type === 'rm') return Boolean(RM_REASONS[row.group]?.includes(row.reason?.key));
+  if (action.type === 'worktree') return row.group === 'projects';
+  if (action.type === 'cmd') {
+    return row.group === 'caches' && cleanCommands(platform).some((c) =>
+      c.cmd === action.cmd && c.args.length === action.args.length && c.args.every((a, i) => a === action.args[i]));
+  }
+  return false;
+}
+
+const isStr = (v) => typeof v === 'string';
+function knownAction(a) {
+  if (!a || typeof a !== 'object') return false;
+  if (a.type === 'none') return true;
+  if (a.type === 'rm') return isStr(a.path);
+  if (a.type === 'cmd') return isStr(a.cmd) && Array.isArray(a.args) && a.args.every(isStr);
+  if (a.type === 'worktree') return isStr(a.repo) && isStr(a.path) && (a.branch === null || isStr(a.branch));
+  return false;
+}
+
+/** Version 1, every group with a rows array, every row an object with a numeric id and a known action shape. */
+export function isValidReport(data) {
+  return Boolean(data) && data.version === 1 && Array.isArray(data.groups) && data.groups.every((g) =>
+    g && Array.isArray(g.rows) && g.rows.every((r) => r && typeof r === 'object' && Number.isInteger(r.id) && knownAction(r.action)));
+}
+
+/** Skip message unless `p` still resolves to the real path the report stored; null when it does. */
+async function realMoved(p, row, platform) {
+  const real = await fs.realpath(p).catch(() => null);
+  if (!real || !isStr(row.real) || !samePath(real, row.real, platform)) return msg('delete.real_changed');
+  return null;
+}
 
 async function lstatOrNull(p) {
   try {
@@ -112,6 +159,8 @@ async function deleteRm(row, ctx) {
   const kind = kindOf(row);
   const refused = await refusal(p, kind);
   if (refused) return outcome(row.id, 'skipped', refused);
+  const moved = await realMoved(p, row, ctx.platform);
+  if (moved) return outcome(row.id, 'skipped', moved);
   const skip = await recheckRm(row, ctx);
   if (skip) return outcome(row.id, 'skipped', skip);
   const freed = await sizeOf(p);
@@ -123,7 +172,8 @@ async function deleteRm(row, ctx) {
 async function runCmd(row, ctx) {
   const {cmd, args} = row.action;
   const before = row.path ? await sizeOf(row.path) : 0;
-  const res = await ctx.run(cmd, args, {timeoutMs: CMD_TIMEOUT_MS});
+  // In home, like the report's lookup: a project folder may pin another tool version.
+  const res = await ctx.run(cmd, args, {cwd: ctx.home, timeoutMs: CMD_TIMEOUT_MS});
   if (res.code !== 0) {
     const error = lastLine(res.stderr) || (res.code === null ? msg('delete.cmd_unavailable') : msg('delete.cmd_exit', {code: res.code}));
     return outcome(row.id, 'failed', msg('delete.failed', {error}));
@@ -152,7 +202,7 @@ async function deleteWorktree(row, ctx, repoState) {
   const key = path.resolve(repo).toLowerCase();
   if (!repoState.has(key)) {
     // A failed fetch leaves older remote refs, which can only make fewer branches look landed.
-    await ctx.run('git', ['fetch', '--prune', 'origin'], {cwd: repo, timeoutMs: FETCH_TIMEOUT_MS});
+    await ctx.run('git', ['fetch', '--prune', 'origin'], {cwd: repo, timeoutMs: FETCH_TIMEOUT_MS, env: FETCH_ENV});
     repoState.set(key, await repoContext(repo, ctx));
   }
   const opts = repoState.get(key);
@@ -164,6 +214,8 @@ async function deleteWorktree(row, ctx, repoState) {
   const {wt} = first;
   const refused = await refusal(wt.path, 'dir');
   if (refused) return outcome(row.id, 'skipped', refused);
+  const moved = await realMoved(wt.path, row, ctx.platform);
+  if (moved) return outcome(row.id, 'skipped', moved);
   // Submodules hold their own commits and stashes under .git/worktrees/<id>/modules; git refuses them too.
   if (await lstatOrNull(path.join(wt.path, '.gitmodules'))) return outcome(row.id, 'skipped', msg('delete.submodules'));
   const freed = await sizeOf(wt.path);
@@ -190,6 +242,7 @@ async function deleteOne(row, id, ctx, repoState) {
   if (!row) return outcome(id, 'skipped', msg('delete.not_in_report'));
   if (row.tag !== 'safe' && row.tag !== 'ask') return outcome(id, 'skipped', msg('delete.not_deletable', {tag: row.tag}));
   const action = row.action ?? {type: 'none'};
+  if (!fromTool(row, ctx.platform)) return outcome(id, 'skipped', msg('delete.not_from_tool'));
   if (row.path && !await lstatOrNull(row.path)) return outcome(id, 'skipped', msg('delete.missing'));
   if (action.type === 'cmd') return runCmd(row, ctx);
   // The folder deleted must be the one the user saw in the report.

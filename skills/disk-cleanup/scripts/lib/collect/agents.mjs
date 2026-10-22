@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import {makeRow} from '../row.mjs';
+import {makeRow, withReal} from '../row.mjs';
+import {foreign} from '../outdir.mjs';
 import {newestMtimeInfo} from '../walk.mjs';
 import {isInside} from './git.mjs';
 
@@ -30,12 +31,16 @@ export async function checkAgentTemp(dir, ctx) {
 
 /**
  * One row per child folder of each agent temp folder, tagged by checkAgentTemp.
+ * The temp folder itself must be a real folder of the current user.
  * @returns {Promise<import('../row.mjs').Row[]>}
  */
 export async function collect(ctx) {
   const rows = [];
   for (const {agent, dir} of AGENT_TEMP) {
     const root = dir(ctx);
+    // On a shared /tmp another user could plant this folder or a link to one: only our own real folder counts.
+    const st = await fs.lstat(root).catch(() => null);
+    if (!st || st.isSymbolicLink() || !st.isDirectory() || foreign(st)) continue;
     let entries;
     try {
       entries = await fs.readdir(root, {withFileTypes: true});
@@ -56,5 +61,5 @@ export async function collect(ctx) {
       }));
     }
   }
-  return rows;
+  return withReal(rows);
 }

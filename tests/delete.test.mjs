@@ -3,12 +3,14 @@ import assert from 'node:assert/strict';
 import {execFile, execFileSync} from 'node:child_process';
 import {promisify} from 'node:util';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import {makeRow} from '../skills/disk-cleanup/scripts/lib/row.mjs';
 import {buildReport} from '../skills/disk-cleanup/scripts/lib/report.mjs';
 import {deleteRows, parseIds} from '../skills/disk-cleanup/scripts/lib/delete.mjs';
 import * as git from '../skills/disk-cleanup/scripts/lib/collect/git.mjs';
 import * as agents from '../skills/disk-cleanup/scripts/lib/collect/agents.mjs';
+import {cleanCommands} from '../skills/disk-cleanup/scripts/lib/collect/caches.mjs';
 import {SCAN, addWorktree, fakeCtx, gitRepoWithOrigin, realRun, tmpdir, writeTree} from './helpers.mjs';
 
 const execFileP = promisify(execFile);
@@ -20,10 +22,15 @@ const gitOut = (cwd, ...args) => execFileSync('git', args, {cwd, stdio: 'pipe', 
 const exists = (p) => fs.lstat(p).then(() => true, () => false);
 const rmRow = (p, tag = 'safe', extra = {}) => makeRow({
   group: 'projects', label: path.basename(p), path: p, bytes: 1, tag,
-  reason: {key: 'reason.nm_old', params: {days: 40}}, action: {type: 'rm', path: p}, ...extra,
+  reason: {key: 'reason.nm_old', params: {days: 40}}, action: {type: 'rm', path: p}, real: p, ...extra,
 });
+// Clean commands the caches collector can produce on this platform: npm, pnpm, yarn, pip.
+const CLEAN = cleanCommands(process.platform);
+const cmdRow = ({cmd, args}, extra = {}) => makeRow({group: 'caches', label: cmd, bytes: 1, tag: 'safe',
+  reason: {key: 'reason.cache_clean', params: {}}, action: {type: 'cmd', cmd, args}, ...extra});
 const idOf = (report, p) => report.groups.flatMap(g => g.rows).find(r => r.path === p).id;
 const byId = (results, id) => results.find(r => r.id === id);
+const idOfLabel = (report, label) => report.groups.flatMap(g => g.rows).find(r => r.label === label).id;
 
 test('parseIds handles lists and ranges', () => {
   assert.deepEqual(parseIds('1, 3,5-7 3'), [1, 3, 5, 6, 7]);
@@ -181,19 +188,19 @@ test('an agent temp folder that became busy is skipped', async () => {
   assert.equal(await exists(old2), false);
 });
 
-test('cmd rows run the command; a failure reports the last stderr line', async () => {
+test('cmd rows run the command in the home folder; a failure reports the last stderr line', async () => {
+  const [good, bad, missing] = CLEAN;
   const calls = [];
   const run = async (cmd, args, opts) => {
     calls.push([cmd, args, opts]);
-    return cmd === 'bad' ? {code: 1, stdout: '', stderr: 'first\nlast line\n'} : {code: 0, stdout: '', stderr: ''};
+    if (cmd === missing.cmd) return {code: null, stdout: '', stderr: ''};
+    return cmd === bad.cmd ? {code: 1, stdout: '', stderr: 'first\nlast line\n'} : {code: 0, stdout: '', stderr: ''};
   };
-  const cmdRow = (cmd) => makeRow({group: 'caches', label: cmd, bytes: 1, tag: 'safe',
-    reason: {key: 'reason.cache_clean', params: {}}, action: {type: 'cmd', cmd, args: ['cache', 'clean', 'с пробелом']}});
-  const report = buildReport([cmdRow('good'), cmdRow('bad'), cmdRow('missing')], [], {now: Date.now()});
-  const ids = Object.fromEntries(report.groups[0].rows.map(r => [r.label, r.id]));
-  const runMissing = async (cmd, args, opts) => (cmd === 'missing' ? {code: null, stdout: '', stderr: ''} : run(cmd, args, opts));
-  const results = await deleteRows(report, [ids.good, ids.bad, ids.missing], fakeCtx({run: runMissing}));
-  assert.deepEqual(calls[0], ['good', ['cache', 'clean', 'с пробелом'], {timeoutMs: 600000}]);
+  const report = buildReport([cmdRow(good), cmdRow(bad), cmdRow(missing)], [], {now: Date.now()});
+  const ids = {good: idOfLabel(report, good.cmd), bad: idOfLabel(report, bad.cmd), missing: idOfLabel(report, missing.cmd)};
+  const ctx = fakeCtx({run});
+  const results = await deleteRows(report, [ids.good, ids.bad, ids.missing], ctx);
+  assert.deepEqual(calls[0], [good.cmd, good.args, {cwd: ctx.home, timeoutMs: 600000}]);
   assert.deepEqual(byId(results, ids.good), {id: ids.good, status: 'deleted', freed: 0, message: 'deleted'});
   assert.equal(byId(results, ids.bad).status, 'failed');
   assert.match(byId(results, ids.bad).message, /last line/);
@@ -208,8 +215,7 @@ test('a cmd row with a path reports the bytes it freed', async () => {
     await fs.rm(path.join(cache, 'a.bin'));
     return {code: 0, stdout: '', stderr: ''};
   };
-  const report = buildReport([makeRow({group: 'caches', label: 'npm cache', path: cache, bytes: 6, tag: 'safe',
-    reason: {key: 'reason.cache_clean', params: {}}, action: {type: 'cmd', cmd: 'npm', args: ['cache', 'clean']}})], [], {now: Date.now()});
+  const report = buildReport([cmdRow(CLEAN[0], {path: cache, bytes: 6})], [], {now: Date.now()});
   const [result] = await deleteRows(report, [1], fakeCtx({run}));
   assert.deepEqual(result, {id: 1, status: 'deleted', freed: 4, message: 'deleted'});
 });
@@ -232,9 +238,12 @@ async function cliEnv() {
   return {temp, env};
 }
 
+// The CLI child runs as this user, so it picks the same per-user folder.
+const reportDirIn = (temp) => path.join(temp, `disk-cleanup-${process.getuid?.() ?? os.userInfo().username}`);
+
 async function writeReport(temp, report) {
-  await fs.mkdir(path.join(temp, 'disk-cleanup'), {recursive: true});
-  await fs.writeFile(path.join(temp, 'disk-cleanup', 'report.json'), JSON.stringify(report));
+  await fs.mkdir(reportDirIn(temp), {recursive: true});
+  await fs.writeFile(path.join(reportDirIn(temp), 'report.json'), JSON.stringify(report));
 }
 
 test('delete without report.json exits 1 and deletes nothing', async () => {
@@ -371,4 +380,125 @@ test('paths differing only in case are different on Linux', async () => {
   const [result] = await deleteRows(report, [1], fakeCtx({platform: 'linux'}));
   assert.equal(result.status, 'skipped');
   assert.equal(await exists(path.join(lower, 'a.txt')), true);
+});
+
+test('a cmd row the caches collector cannot produce is skipped and never run', async () => {
+  const calls = [];
+  const run = async (cmd, args) => { calls.push([cmd, ...args]); return {code: 0, stdout: '', stderr: ''}; };
+  const forged = [
+    cmdRow({cmd: 'rm', args: ['-rf', '/']}),
+    cmdRow({cmd: CLEAN[0].cmd, args: [...CLEAN[0].args, '--prefix', '/']}),
+    cmdRow(CLEAN[0], {group: 'projects'}),
+  ];
+  const report = buildReport(forged, [], {now: Date.now()});
+  const results = await deleteRows(report, [1, 2, 3], fakeCtx({run}));
+  for (const r of results) {
+    assert.equal(r.status, 'skipped');
+    assert.match(r.message, /not produced by this tool/);
+  }
+  assert.deepEqual(calls, []);
+});
+
+test('an rm row with a group or reason the collectors never use for rm is skipped', async () => {
+  const base = await tmpdir();
+  await writeTree(base, {'a/x.txt': 'a', 'b/x.txt': 'b', 'c/x.txt': 'c'});
+  const p = (name) => path.join(base, name);
+  const report = buildReport([
+    rmRow(p('a'), 'safe', {reason: {key: 'reason.heavy_show', params: {}}}),
+    rmRow(p('b'), 'safe', {group: 'heavy'}),
+    rmRow(p('c'), 'safe', {reason: {key: 'reason.git_landed', params: {}}}),
+  ], [], {now: Date.now()});
+  const results = await deleteRows(report, [1, 2, 3], fakeCtx());
+  for (const r of results) {
+    assert.equal(r.status, 'skipped');
+    assert.match(r.message, /not produced by this tool/);
+  }
+  for (const name of ['a', 'b', 'c']) assert.equal(await exists(path.join(p(name), 'x.txt')), true);
+});
+
+test('an rm row whose real path differs from the report, or has none, is skipped', async () => {
+  const base = await tmpdir();
+  await writeTree(base, {'nm/x.js': '1', 'nm2/x.js': '2'});
+  const nm = path.join(base, 'nm');
+  const nm2 = path.join(base, 'nm2');
+  const report = buildReport([rmRow(nm, 'safe', {real: path.join(base, 'elsewhere')}), rmRow(nm2, 'safe', {real: undefined})],
+    [], {now: Date.now()});
+  const results = await deleteRows(report, [idOf(report, nm), idOf(report, nm2)], fakeCtx());
+  for (const r of results) {
+    assert.equal(r.status, 'skipped');
+    assert.match(r.message, /resolves to another place/);
+  }
+  assert.equal(await exists(path.join(nm, 'x.js')), true);
+  assert.equal(await exists(path.join(nm2, 'x.js')), true);
+});
+
+test('collector rows carry the real path the report saw', async () => {
+  const {repo} = await gitRepoWithOrigin();
+  const wt = await addWorktree(repo, 'feat/landed', {commit: true, mergeIntoMainAndPush: true});
+  await writeTree(repo, {'.claude/worktrees/ghost/a.js': '1'});
+  const rows = await git.collect(later(), [repo]);
+  assert.equal(rows.find(r => r.path === wt).real, await fs.realpath(wt));
+  const ghost = path.join(repo, '.claude', 'worktrees', 'ghost');
+  assert.equal(rows.find(r => r.path === ghost).real, await fs.realpath(ghost));
+});
+
+test('git fetch before a worktree delete never prompts for credentials', async () => {
+  const {repo} = await gitRepoWithOrigin();
+  const wt = await addWorktree(repo, 'feat/done', {commit: true, mergeIntoMainAndPush: true});
+  const report = buildReport(await git.collect(later(), [repo]), [], {now: Date.now()});
+  const fetches = [];
+  const run = async (cmd, args, opts) => {
+    if (cmd === 'git' && args[0] === 'fetch') fetches.push(opts);
+    return noGh(cmd, args, opts);
+  };
+  const [result] = await deleteRows(report, [idOf(report, wt)], later({run}));
+  assert.equal(result.status, 'deleted', result.message);
+  assert.equal(fetches.length, 1);
+  assert.deepEqual(fetches[0]['env'], {GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never'});
+});
+
+test('delete refuses a report folder that is a link and deletes nothing', async () => {
+  const {temp, env} = await cliEnv();
+  await writeTree(temp, {'victim/a.txt': 'a', 'planted/x': 'x'});
+  const planted = path.join(temp, 'planted');
+  await fs.writeFile(path.join(planted, 'report.json'),
+    JSON.stringify(buildReport([rmRow(path.join(temp, 'victim'))], [], {now: Date.now()})));
+  await fs.symlink(planted, reportDirIn(temp), process.platform === 'win32' ? 'junction' : 'dir');
+  await assert.rejects(
+    execFileP(process.execPath, [SCAN, 'delete', '1'], {env}),
+    (e) => e.code === 1 && /link or belongs to another user/.test(e.stderr),
+  );
+  assert.equal(await exists(path.join(temp, 'victim', 'a.txt')), true);
+});
+
+test('delete refuses a report.json that is a link', async (t) => {
+  const {temp, env} = await cliEnv();
+  await writeTree(temp, {'victim/a.txt': 'a'});
+  const real = path.join(temp, 'real.json');
+  await fs.writeFile(real, JSON.stringify(buildReport([rmRow(path.join(temp, 'victim'))], [], {now: Date.now()})));
+  await fs.mkdir(reportDirIn(temp));
+  try {
+    await fs.symlink(real, path.join(reportDirIn(temp), 'report.json'), 'file');
+  } catch {
+    t.skip('no right to create file symlinks here; the folder link test covers the rule');
+    return;
+  }
+  await assert.rejects(
+    execFileP(process.execPath, [SCAN, 'delete', '1'], {env}),
+    (e) => e.code === 1 && /link or belongs to another user/.test(e.stderr),
+  );
+  assert.equal(await exists(path.join(temp, 'victim', 'a.txt')), true);
+});
+
+test('delete with a row of unknown action shape exits 1 and deletes nothing', async () => {
+  const {temp, env} = await cliEnv();
+  await writeTree(temp, {'victim/a.txt': 'a'});
+  const report = buildReport([rmRow(path.join(temp, 'victim'))], [], {now: Date.now()});
+  report.groups[0].rows.push({...report.groups[0].rows[0], id: 2, action: {type: 'shell', script: 'rm -rf ~'}});
+  await writeReport(temp, report);
+  await assert.rejects(
+    execFileP(process.execPath, [SCAN, 'delete', '1'], {env}),
+    (e) => e.code === 1 && /unknown format/.test(e.stderr),
+  );
+  assert.equal(await exists(path.join(temp, 'victim', 'a.txt')), true);
 });

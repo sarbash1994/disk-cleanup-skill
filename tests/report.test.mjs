@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import {makeRow} from '../skills/disk-cleanup/scripts/lib/row.mjs';
 import {EN} from '../skills/disk-cleanup/scripts/lib/strings.mjs';
@@ -74,7 +75,8 @@ test('renderSummary lists group totals and the largest deletable rows only', () 
   assert.ok(!/#\d+ .*kept/.test(s));
 });
 
-test('report command writes both files and prints their paths', async () => {
+/** Env for a report run that sees only empty fixture folders. */
+async function reportEnv() {
   const base = await tmpdir();
   const dirs = {};
   for (const name of ['home', 'temp', 'local', 'appdata', 'npm', 'pw', 'pptr', 'roots']) {
@@ -89,6 +91,11 @@ test('report command writes both files and prints their paths', async () => {
     npm_config_cache: dirs.npm, PLAYWRIGHT_BROWSERS_PATH: dirs.pw, PUPPETEER_CACHE_DIR: dirs.pptr,
   };
   if (process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot;
+  return {dirs, env};
+}
+
+test('report command writes both files and prints their paths', async () => {
+  const {dirs, env} = await reportEnv();
   const {stdout} = await execFileP(process.execPath, [SCAN, 'report', '--roots', dirs.roots], {env});
   assert.match(stdout, /report\.html/);
   assert.match(stdout, /report\.json/);
@@ -97,4 +104,17 @@ test('report command writes both files and prints their paths', async () => {
   assert.equal(json.version, 1);
   const html = await fs.readFile(jsonPath.replace(/json$/, 'html'), 'utf8');
   assert.ok(html.includes('<html'));
+});
+
+test('report refuses a report folder that is a link and writes nothing through it', async () => {
+  const {dirs, env} = await reportEnv();
+  const planted = path.join(dirs.temp, 'planted');
+  await fs.mkdir(planted);
+  const own = path.join(dirs.temp, `disk-cleanup-${process.getuid?.() ?? os.userInfo().username}`);
+  await fs.symlink(planted, own, process.platform === 'win32' ? 'junction' : 'dir');
+  await assert.rejects(
+    execFileP(process.execPath, [SCAN, 'report', '--roots', dirs.roots], {env}),
+    (e) => e.code === 1 && /link or belongs to another user/.test(e.stderr),
+  );
+  assert.deepEqual(await fs.readdir(planted), []);
 });

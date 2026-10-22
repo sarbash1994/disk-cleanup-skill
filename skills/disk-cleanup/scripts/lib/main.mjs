@@ -1,5 +1,3 @@
-import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import {EN, loadStrings, t} from './strings.mjs';
 import {fixedDrives, makeContext} from './ctx.mjs';
@@ -7,7 +5,8 @@ import {measureSize} from './walk.mjs';
 import {listDisks} from './disks.mjs';
 import {defaultRoots, findRepos} from './discover.mjs';
 import {buildReport, formatBytes, renderHtml, renderSummary} from './report.mjs';
-import {deleteRows, parseIds} from './delete.mjs';
+import {deleteRows, isValidReport, parseIds} from './delete.mjs';
+import {UnsafePathError, prepareDir, readOwnFile, reportDir, writeOwnFile} from './outdir.mjs';
 import {parseFlags} from './flags.mjs';
 import * as projects from './collect/projects.mjs';
 import * as git from './collect/git.mjs';
@@ -76,12 +75,17 @@ async function report(flags) {
 
   const disks = await listDisks(ctx, [...roots, ctx.home, ctx.tmp]);
   const result = buildReport(rows, disks, {now: Date.now()});
-  const dir = path.join(os.tmpdir(), 'disk-cleanup');
-  await fs.mkdir(dir, {recursive: true});
+  const dir = reportDir();
   const jsonFile = path.join(dir, 'report.json');
   const htmlFile = path.join(dir, 'report.html');
-  await fs.writeFile(jsonFile, JSON.stringify(result, null, 2));
-  await fs.writeFile(htmlFile, renderHtml(result, strings));
+  try {
+    await prepareDir(dir);
+    await writeOwnFile(jsonFile, JSON.stringify(result, null, 2));
+    await writeOwnFile(htmlFile, renderHtml(result, strings));
+  } catch (err) {
+    if (err instanceof UnsafePathError) return fail(t(EN, 'unsafe_path', {file: err.path}));
+    throw err;
+  }
   process.stdout.write(`${renderSummary(result, strings, {top: 5})}\n\n${htmlFile}\n${jsonFile}\n`);
 }
 
@@ -101,14 +105,15 @@ async function del(args) {
     return fail(t(EN, 'delete.bad_ids', {error: err.message}));
   }
 
-  const file = path.join(os.tmpdir(), 'disk-cleanup', 'report.json');
+  const file = path.join(reportDir(), 'report.json');
   let data;
   try {
-    data = JSON.parse(await fs.readFile(file, 'utf8'));
+    data = JSON.parse(await readOwnFile(file));
   } catch (err) {
+    if (err instanceof UnsafePathError) return fail(t(EN, 'unsafe_path', {file: err.path}));
     return fail(t(EN, err.code === 'ENOENT' ? 'delete.no_report' : 'delete.bad_report', {file}));
   }
-  if (!data || data.version !== 1 || !Array.isArray(data.groups)) return fail(t(EN, 'delete.bad_report', {file}));
+  if (!isValidReport(data)) return fail(t(EN, 'delete.bad_report', {file}));
   if (typeof data.createdAt !== 'number' || Date.now() - data.createdAt > DAY_MS) {
     process.stdout.write(t(EN, 'delete.old_report') + '\n');
   }

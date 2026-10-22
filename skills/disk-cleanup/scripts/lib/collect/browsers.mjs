@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import {makeRow} from '../row.mjs';
+import {makeRow, withReal} from '../row.mjs';
 
 async function subdirs(dir) {
   try {
@@ -89,5 +89,5 @@ async function puppeteerRows(ctx) {
  * @returns {Promise<import('../row.mjs').Row[]>}
  */
 export async function collect(ctx) {
-  return [...(await playwrightRows(ctx)), ...(await puppeteerRows(ctx))];
+  return withReal([...(await playwrightRows(ctx)), ...(await puppeteerRows(ctx))]);
 }

@@ -6,7 +6,23 @@
  *          | {type:'none'}} Action */
 /** @typedef {{id:number, group:Group, label:string, path:string|null,
  *            bytes:number|null, tag:Tag, reason:{key:string, params:object},
- *            action:Action, command?:string}} Row */
+ *            action:Action, command?:string, real?:string|null}} Row */
+
+import fs from 'node:fs/promises';
+
+/**
+ * Stores `real`, the resolved path the report saw, on every rm and worktree row;
+ * delete refuses a row whose path resolves elsewhere by then. null when the path cannot be resolved.
+ * @param {Row[]} rows
+ */
+export async function withReal(rows) {
+  for (const row of rows) {
+    if ((row.action?.type === 'rm' || row.action?.type === 'worktree') && row.path) {
+      row.real = await fs.realpath(row.path).catch(() => null);
+    }
+  }
+  return rows;
+}
 
 /** Display order of the report groups. */
 export const GROUPS = ['projects', 'caches', 'browsers', 'agents', 'heavy'];

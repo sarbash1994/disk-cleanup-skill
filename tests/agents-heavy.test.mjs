@@ -95,3 +95,16 @@ test('Claude temp: an empty folder is dated by its own mtime', async () => {
   assert.equal(oldRow.reason.params.days, 3);
   assert.equal(rows.find(r => r.path.endsWith('empty-new')).tag, 'ask');
 });
+test('Claude temp: a <tmp>/claude that is a link gives no rows', async () => {
+  const tmp = await tmpdir();
+  const elsewhere = await tmpdir();
+  await writeTree(elsewhere, {'old/a.txt': '1'});
+  await setAllMtimes(path.join(elsewhere, 'old'), new Date(Date.now() - 3 * 86400000));
+  await fs.symlink(elsewhere, path.join(tmp, 'claude'), process.platform === 'win32' ? 'junction' : 'dir');
+  assert.deepEqual(await agents.collect(fakeCtx({tmp})), []);
+});
+test('Claude temp rows carry the real path the report saw', async () => {
+  const tmp = await tmpdir(); await writeTree(tmp, {'claude/old/a.txt': '1'});
+  const [row] = await agents.collect(fakeCtx({tmp}));
+  assert.equal(row.real, await fs.realpath(path.join(tmp, 'claude', 'old')));
+});

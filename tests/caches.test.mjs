@@ -145,3 +145,10 @@ test('run: an unsafe argument for a .cmd is rejected, not executed', {skip: proc
     assert.deepEqual(await run('npm.cmd', [bad]), {code: null, stdout: '', stderr: 'unsafe argument'}, JSON.stringify(bad));
   }
 });
+
+test('run: a .cmd name with cmd.exe delimiters is rejected (win32 only, the guard sits in the win32 branch)', {skip: process.platform !== 'win32'}, async () => {
+  const run = makeContext().run;
+  for (const bad of ['x;y.cmd', 'x=y.cmd', 'x,y.cmd', 'x y.cmd']) {
+    assert.deepEqual(await run(bad, []), {code: null, stdout: '', stderr: 'unsafe argument'}, bad);
+  }
+});

@@ -5,6 +5,8 @@ import os from 'node:os';
 const DEFAULT_TIMEOUT_MS = 20_000;
 // Characters cmd.exe would act on even inside double quotes.
 const UNSAFE_ARG = /[%^&|<>\r\n]/;
+// Allow-list: cmd.exe also splits a command name at ; , = and similar, so only plain names pass.
+const SAFE_CMD_NAME = /^[A-Za-z0-9_.-]+\.cmd$/i;
 const quote = (s) => `"${String(s).replace(/"/g, '\\"')}"`;
 
 /** Drive roots (like `D:\`) that exist on this machine; only Windows has them. */
@@ -42,7 +44,7 @@ export function makeContext({busy = []} = {}) {
         // The command name stays unquoted: cmd.exe resolves %~dp0 wrongly for a quoted .cmd found through PATH
         // (npm.cmd then looks for node_modules in the current folder), so it must be a plain bare name.
         if (process.platform === 'win32' && /\.cmd$/i.test(cmd)) {
-          if (/[\s"]/.test(cmd) || [cmd, ...args].some((part) => UNSAFE_ARG.test(String(part)))) {
+          if (!SAFE_CMD_NAME.test(cmd) || args.some((part) => UNSAFE_ARG.test(String(part)))) {
             return resolve({code: null, stdout: '', stderr: 'unsafe argument'});
           }
           file = [cmd, ...args.map(quote)].join(' ');

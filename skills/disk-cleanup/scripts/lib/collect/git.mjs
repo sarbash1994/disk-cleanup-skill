@@ -163,6 +163,63 @@ async function fetchPrs(repo, ctx) {
   }
 }
 
+/**
+ * What the branch rules of one repo need: the default remote branch, the current branch and PR data.
+ * Used by the report and again before deletion.
+ * @returns {Promise<{prs: object[]|null, base: string, current: string|null}|null>} null without an origin default branch
+ */
+export async function repoContext(repo, ctx) {
+  const base = await findBase(repo, ctx);
+  if (!base) return null;
+  const currentRes = await ctx.run('git', ['branch', '--show-current'], {cwd: repo});
+  const current = currentRes.code === 0 && currentRes.stdout.trim() ? currentRes.stdout.trim() : null;
+  const prs = await fetchPrs(repo, ctx);
+  return {prs, base, current};
+}
+
+/** A folder in an agent worktree folder that git lists as a worktree: same name, or a worktree lives inside it. */
+export function isKnownWorktree(dir, worktrees) {
+  const name = path.basename(dir).toLowerCase();
+  return worktrees.some((wt) => path.basename(wt.path).toLowerCase() === name || isInside(wt.path, dir));
+}
+
+/** The repo whose `.claude/worktrees/` or `.worktrees/` folder directly holds `entry`, else null. */
+export function agentDirRepo(entry) {
+  for (const parts of AGENT_DIRS) {
+    let dir = path.dirname(path.resolve(entry));
+    let match = true;
+    for (let i = parts.length - 1; i >= 0 && match; i--) {
+      match = path.basename(dir).toLowerCase() === parts[i];
+      dir = path.dirname(dir);
+    }
+    if (match) return dir;
+  }
+  return null;
+}
+
+/**
+ * Rules for one entry of an agent worktree folder that git does not list as a worktree;
+ * used by the report and again before deletion. Links are never candidates.
+ * @returns {Promise<{tag:'safe'|'ask'|'keep', reasonKey:string, params:object}|null>} null when the entry is no candidate
+ */
+export async function checkOrphan(entry, ctx) {
+  const result = (tag, reasonKey) => ({tag, reasonKey, params: {}});
+  let st;
+  try {
+    st = await fs.lstat(entry);
+  } catch {
+    return null;
+  }
+  if (st.isDirectory()) {
+    if (await inUse(entry, ctx)) return result('keep', 'reason.git_busy');
+    // A clone or a moved worktree may hold commits, stashes or changes.
+    if (await exists(path.join(entry, '.git'))) return result('ask', 'reason.git_orphan_repo');
+    return result('safe', 'reason.git_orphan');
+  }
+  if (st.isFile() && LOOSE_FILE.test(path.basename(entry))) return result('safe', 'reason.git_loose_log');
+  return null;
+}
+
 /** A linked worktree has its own git dir apart from the common one; its main checkout is scanned instead. */
 async function isLinkedWorktree(repo, ctx) {
   const res = await ctx.run('git', ['rev-parse', '--git-dir', '--git-common-dir'], {cwd: repo});
@@ -201,12 +258,8 @@ async function collectRepo(ctx, repo) {
   }
   if (!linked.length && !agentDirs.length) return [];
 
-  const base = await findBase(repo, ctx);
-  if (!base) return [];
-  const currentRes = await ctx.run('git', ['branch', '--show-current'], {cwd: repo});
-  const current = currentRes.code === 0 && currentRes.stdout.trim() ? currentRes.stdout.trim() : null;
-  const prs = await fetchPrs(repo, ctx);
-  const opts = {prs, base, current};
+  const opts = await repoContext(repo, ctx);
+  if (!opts) return [];
 
   const name = path.basename(repo);
   const rows = [];
@@ -226,30 +279,19 @@ async function collectRepo(ctx, repo) {
     }));
   }
 
-  const knownNames = new Set(worktrees.map((wt) => path.basename(wt.path).toLowerCase()));
   for (const {dir, entries} of agentDirs) {
     const rel = path.relative(repo, dir).split(path.sep).join('/');
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
-      let reasonKey = null;
-      let tag = 'safe';
-      if (entry.isDirectory()) {
-        const known = knownNames.has(entry.name.toLowerCase()) || worktrees.some((wt) => isInside(wt.path, full));
-        if (known) continue;
-        if (await inUse(full, ctx)) [tag, reasonKey] = ['keep', 'reason.git_busy'];
-        // A clone or a moved worktree may hold commits, stashes or changes.
-        else if (await exists(path.join(full, '.git'))) [tag, reasonKey] = ['ask', 'reason.git_orphan_repo'];
-        else reasonKey = 'reason.git_orphan';
-      } else if (entry.isFile() && LOOSE_FILE.test(entry.name)) {
-        reasonKey = 'reason.git_loose_log';
-      }
-      if (!reasonKey) continue;
+      if (entry.isDirectory() && isKnownWorktree(full, worktrees)) continue;
+      const check = await checkOrphan(full, ctx);
+      if (!check) continue;
       rows.push(makeRow({
         group: 'projects',
         label: `${name}/${rel}/${entry.name}`,
         path: full,
-        tag,
-        reason: {key: reasonKey, params: {}},
+        tag: check.tag,
+        reason: {key: check.reasonKey, params: check.params},
         action: {type: 'rm', path: full},
       }));
     }

@@ -1,7 +1,19 @@
 import {execFile} from 'node:child_process';
+import fs from 'node:fs';
 import os from 'node:os';
 
 const DEFAULT_TIMEOUT_MS = 20_000;
+
+/** Drive roots (like `D:\`) that exist on this machine; only Windows has them. */
+function existingDrives() {
+  if (process.platform !== 'win32') return [];
+  const drives = [];
+  for (let c = 67; c <= 90; c++) {
+    const drive = `${String.fromCharCode(c)}:\\`;
+    if (fs.existsSync(drive)) drives.push(drive);
+  }
+  return drives;
+}
 
 /**
  * Context for the real machine.
@@ -13,6 +25,7 @@ export function makeContext({busy = []} = {}) {
     home: os.homedir(),
     tmp: os.tmpdir(),
     platform: process.platform,
+    drives: existingDrives(),
     env: process.env,
     now: Date.now(),
     busy,

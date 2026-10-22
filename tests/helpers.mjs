@@ -38,6 +38,7 @@ export function fakeCtx(overrides = {}) {
     home: path.join(base, 'home'),
     tmp: path.join(base, 'tmp'),
     platform: process.platform,
+    drives: [],
     env: {},
     now: Date.now(),
     busy: [],

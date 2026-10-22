@@ -1,15 +1,17 @@
-import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-/** Folder names never searched for projects, per platform. */
+/** System folders never searched when they sit directly in a filesystem root (`/`, `C:\`), per platform. */
 export const SKIP_DIRS = {
-  win32: ['Windows', 'Program Files', 'Program Files (x86)', 'ProgramData', 'AppData',
+  win32: ['Windows', 'Program Files', 'Program Files (x86)', 'ProgramData',
           '$Recycle.Bin', 'System Volume Information'],
   darwin: ['System', 'Library', 'Applications', 'Volumes', 'private'],
   linux: ['proc', 'sys', 'usr', 'var', 'dev', 'etc', 'boot', 'bin', 'sbin', 'lib', 'lib64', 'snap'],
 };
+
+/** Names skipped at any depth, besides node_modules. */
+const SKIP_ANYWHERE = {win32: ['AppData'], darwin: [], linux: []};
 
 /** Names compare case-insensitively on Windows and macOS. */
 const folder = (ctx) => (s) => (ctx.platform === 'win32' || ctx.platform === 'darwin' ? s.toLowerCase() : s);
@@ -28,11 +30,11 @@ function isInside(child, parent, ctx) {
  */
 export async function findRepos(roots, ctx, {maxDepth = 8} = {}) {
   const f = folder(ctx);
-  const skipNames = new Set([...(SKIP_DIRS[ctx.platform] ?? []), 'node_modules'].map(f));
+  const skipAnywhere = new Set([...(SKIP_ANYWHERE[ctx.platform] ?? []), 'node_modules'].map(f));
+  const skipInRoot = new Set((SKIP_DIRS[ctx.platform] ?? []).map(f));
   // Skipped only at exactly this place, not wherever the name occurs.
   const skipPaths = new Set();
   if (ctx.platform === 'darwin') skipPaths.add(f(path.join(ctx.home, 'Library')));
-  if (ctx.platform === 'linux') skipPaths.add(f(path.join(ctx.home, '.cache')));
 
   const found = new Set();
   const seen = new Set();
@@ -52,9 +54,11 @@ export async function findRepos(roots, ctx, {maxDepth = 8} = {}) {
       return;
     }
     if (depth >= maxDepth) return;
+    const atRoot = path.parse(dir).root === dir;
     const subdirs = entries.filter((e) => e.isDirectory()
       && !e.name.startsWith('.')
-      && !skipNames.has(f(e.name))
+      && !skipAnywhere.has(f(e.name))
+      && !(atRoot && skipInRoot.has(f(e.name)))
       && !skipPaths.has(f(path.join(dir, e.name))));
     await Promise.all(subdirs.map((e) => visit(path.join(dir, e.name), depth + 1)));
   }
@@ -121,9 +125,8 @@ export async function defaultRoots(ctx) {
   const roots = [ctx.home];
   if (ctx.platform === 'win32') {
     const homeDrive = path.win32.parse(ctx.home).root.toUpperCase();
-    for (let c = 67; c <= 90; c++) {
-      const drive = `${String.fromCharCode(c)}:\\`;
-      if (drive !== homeDrive && fs.existsSync(drive)) roots.push(drive);
+    for (const drive of ctx.drives ?? []) {
+      if (drive.toUpperCase() !== homeDrive) roots.push(drive);
     }
   }
 

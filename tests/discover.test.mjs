@@ -58,3 +58,29 @@ test('listDisks reports total and free space', async () => {
     assert.ok(d.free <= d.total);
   }
 });
+
+test('findRepos searches ordinary folders that share a name with system folders', async () => {
+  const home = await tmpdir();
+  await writeTree(home, {'dev/app/.git/HEAD': 'x', 'lib/app/.git/HEAD': 'x'});
+  const found = await findRepos([home], fakeCtx({home, platform: 'linux'}), {maxDepth: 8});
+  assert.deepEqual(found.map(p => path.relative(home, p)).sort(), [path.join('dev', 'app'), path.join('lib', 'app')]);
+
+  const mac = await tmpdir();
+  await writeTree(mac, {'private/app/.git/HEAD': 'x'});
+  assert.deepEqual(await findRepos([mac], fakeCtx({home: mac, platform: 'darwin'}), {maxDepth: 8}), [path.join(mac, 'private', 'app')]);
+});
+
+test('findRepos skips ~/Library on macOS but searches a Library folder elsewhere', async () => {
+  const home = await tmpdir(); const work = await tmpdir();
+  await writeTree(home, {'Library/app/.git/HEAD': 'x'});
+  await writeTree(work, {'Library/app/.git/HEAD': 'x'});
+  const ctx = fakeCtx({home, platform: 'darwin'});
+  assert.deepEqual(await findRepos([home], ctx, {maxDepth: 8}), []);
+  assert.deepEqual(await findRepos([work], ctx, {maxDepth: 8}), [path.join(work, 'Library', 'app')]);
+});
+
+test('defaultRoots takes Windows drives from ctx.drives only', async () => {
+  const home = await tmpdir(); const drive = await tmpdir();
+  assert.ok((await defaultRoots(fakeCtx({home, platform: 'win32', drives: [drive]}))).includes(drive));
+  assert.deepEqual(await defaultRoots(fakeCtx({home, platform: 'win32'})), [home]);
+});

@@ -288,3 +288,58 @@ test('branch count includes ancestor-landed and cherry-landed branches, not unla
   const count = rows.find(r => r.reason.key === 'reason.git_branch_count');
   assert.deepEqual(count.reason.params, {count: 2});
 });
+
+test('untracked files count as changes even with status.showUntrackedFiles=no', async () => {
+  const {repo} = await gitRepoWithOrigin();
+  git(repo, 'config', 'status.showUntrackedFiles', 'no');
+  const wt = await addWorktree(repo, 'feat/landed', {commit: true, mergeIntoMainAndPush: true, untracked: 'notes.txt'});
+  const rows = await collect(later({run: noGh}), [repo]);
+  assert.equal(rowAt(rows, wt).tag, 'keep');
+  assert.equal(rowAt(rows, wt).reason.key, 'reason.git_dirty');
+});
+
+test('a squash-merged branch whose remote branch is gone is safe through its verified merged PR', async () => {
+  const {repo} = await gitRepoWithOrigin();
+  const wt = await addWorktree(repo, 'feat/sq', {commit: true, push: true});
+  await writeTree(wt, {'second.txt': '2\n'});
+  git(wt, 'add', '-A');
+  git(wt, 'commit', '-q', '-m', 'second');
+  git(wt, 'push', '-q', 'origin', 'feat/sq');
+  const tip = git(wt, 'rev-parse', 'HEAD').trim();
+  git(repo, 'merge', '-q', '--squash', 'feat/sq');
+  git(repo, 'commit', '-q', '-m', 'squash feat/sq');
+  git(repo, 'push', '-q', 'origin', 'main');
+  git(repo, 'push', '-q', 'origin', '--delete', 'feat/sq');
+  git(repo, 'fetch', '-q', '--prune', 'origin');
+  const prs = [{number: 12, state: 'MERGED', headRefName: 'feat/sq', headRefOid: tip}];
+  const rows = await collect(later({run: withPrs(prs)}), [repo]);
+  assert.equal(rowAt(rows, wt).tag, 'safe');
+  assert.deepEqual(rowAt(rows, wt).reason, {key: 'reason.git_landed', params: {pr: 12}});
+  // Without PR data the same branch has commits on no remote.
+  assert.equal(rowAt(await collect(later({run: noGh}), [repo]), wt).reason.key, 'reason.git_local_commits');
+});
+
+test('an orphan folder with a .git deeper inside is ask', async () => {
+  const {repo} = await gitRepoWithOrigin();
+  await writeTree(repo, {
+    '.claude/worktrees/nested/pkg/sub/.git/HEAD': 'ref: refs/heads/main\n',
+    '.claude/worktrees/nested/pkg/sub/a.js': '1',
+  });
+  const nested = path.join(repo, '.claude', 'worktrees', 'nested');
+  const rows = await collect(later({run: noGh}), [repo]);
+  assert.equal(rowAt(rows, nested).tag, 'ask');
+  assert.equal(rowAt(rows, nested).reason.key, 'reason.git_orphan_repo');
+});
+
+test('a worktree with submodules is ask at report time', async () => {
+  const {repo} = await gitRepoWithOrigin();
+  const wt = await addWorktree(repo, 'feat/sub');
+  await writeTree(wt, {'.gitmodules': '[submodule "lib"]\n\tpath = lib\n\turl = ../lib.git\n'});
+  git(wt, 'add', '-A');
+  git(wt, 'commit', '-q', '-m', 'add submodule config');
+  git(repo, 'merge', '-q', '--no-ff', '-m', 'merge feat/sub', 'feat/sub');
+  git(repo, 'push', '-q', 'origin', 'main');
+  const rows = await collect(later({run: noGh}), [repo]);
+  assert.equal(rowAt(rows, wt).tag, 'ask');
+  assert.equal(rowAt(rows, wt).reason.key, 'reason.git_submodules');
+});

@@ -70,18 +70,20 @@ export async function measureSize(dir, {deadline}) {
  * named in `skip`, looking at no more than `limit` entries. newest is 0 when nothing is found.
  * complete is false when the root cannot be read or the limit was reached
  * (reaching it counts as incomplete even if nothing was left).
- * @returns {Promise<{newest: number, complete: boolean}>}
+ * gitSeen is true when an entry named `.git` (file or folder) was met at any depth looked at.
+ * @returns {Promise<{newest: number, complete: boolean, gitSeen: boolean}>}
  */
 export async function newestMtimeInfo(dir, {skip = ['node_modules', '.git'], limit = 20000} = {}) {
   try {
     await (await fs.opendir(dir)).close();
   } catch {
-    return {newest: 0, complete: false};
+    return {newest: 0, complete: false, gitSeen: false};
   }
   const skipped = new Set(skip);
   const stack = [dir];
   let newest = 0;
   let looked = 0;
+  let gitSeen = false;
 
   while (stack.length && looked < limit) {
     const current = stack.pop();
@@ -90,6 +92,7 @@ export async function newestMtimeInfo(dir, {skip = ['node_modules', '.git'], lim
       const batch = chunk.length > room ? chunk.slice(0, room) : chunk;
       looked += batch.length;
       await Promise.all(batch.map(async (entry) => {
+        if (entry.name === '.git') gitSeen = true;
         if (skipped.has(entry.name)) return;
         const full = path.join(current, entry.name);
         let st;
@@ -105,7 +108,7 @@ export async function newestMtimeInfo(dir, {skip = ['node_modules', '.git'], lim
       if (looked >= limit) break;
     }
   }
-  return {newest, complete: looked < limit};
+  return {newest, complete: looked < limit, gitSeen};
 }
 
 /** newestMtimeInfo without the completeness flag. */

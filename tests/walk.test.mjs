@@ -52,9 +52,18 @@ test('newestMtimeInfo is complete for a small tree, incomplete at the limit or f
   const d = await tmpdir(); await writeTree(d, {'x/new.txt': '1', 'y.txt': '2'});
   const t = new Date('2026-02-02'); await fs.utimes(path.join(d, 'x/new.txt'), t, t);
   await fs.utimes(path.join(d, 'y.txt'), new Date('2026-01-01'), new Date('2026-01-01'));
-  assert.deepEqual(await newestMtimeInfo(d, {}), {newest: t.getTime(), complete: true});
+  assert.deepEqual(await newestMtimeInfo(d, {}), {newest: t.getTime(), complete: true, gitSeen: false});
   assert.equal((await newestMtimeInfo(d, {limit: 1})).complete, false);
-  assert.deepEqual(await newestMtimeInfo(path.join(d, 'nope'), {}), {newest: 0, complete: false});
+  assert.deepEqual(await newestMtimeInfo(path.join(d, 'nope'), {}), {newest: 0, complete: false, gitSeen: false});
   const empty = await tmpdir();
-  assert.deepEqual(await newestMtimeInfo(empty, {}), {newest: 0, complete: true});
+  assert.deepEqual(await newestMtimeInfo(empty, {}), {newest: 0, complete: true, gitSeen: false});
+});
+
+test('newestMtimeInfo reports a .git met at any depth', async () => {
+  const d = await tmpdir();
+  await writeTree(d, {'a/b/.git/HEAD': 'x', 'a/b/c.txt': '1'});
+  assert.equal((await newestMtimeInfo(d, {})).gitSeen, true);
+  const plain = await tmpdir();
+  await writeTree(plain, {'a/b/c.txt': '1'});
+  assert.equal((await newestMtimeInfo(plain, {})).gitSeen, false);
 });

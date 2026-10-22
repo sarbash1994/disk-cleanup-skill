@@ -75,7 +75,8 @@ async function classify(repo, branch, {prs, base, current}, ctx) {
   let keep = null;
   if (branch === defaultBranch || (current && branch === current)) keep = 'reason.git_current';
   else if (own.some((p) => p.state === 'OPEN')) keep = 'reason.git_open_pr';
-  else if (!cherryLanded) {
+  // A verified merged PR keeps its commits on GitHub under refs/pull/N/head, even after the branch is deleted.
+  else if (!cherryLanded && !mergedPr) {
     const local = await ctx.run('git', ['log', ref, '--not', '--remotes', '--format=%H', '--max-count=1'], {cwd: repo});
     // A failed git log cannot prove the commits are pushed.
     if (local.code !== 0 || local.stdout.trim() !== '') keep = 'reason.git_local_commits';
@@ -85,7 +86,7 @@ async function classify(repo, branch, {prs, base, current}, ctx) {
 
 /**
  * Branch-level rules. `keep` is the first branch-level keep reason
- * (default or current branch, open PR, commits on no remote unless cherry-landed), or null.
+ * (default or current branch, open PR, commits on no remote unless cherry-landed or in a verified merged PR), or null.
  * A MERGED PR lands the branch only when its headRefOid is the local tip or descends from it.
  * @param {{prs: object[]|null, base: string, current: string|null}} opts
  * @returns {Promise<{landed:boolean, keep:string|null}>}
@@ -96,13 +97,14 @@ export async function classifyBranch(repo, branch, opts, ctx) {
 }
 
 /**
- * In use: a ctx.busy dir equal to or inside `dir`, a file changed in the last 24 hours,
+ * busy: a ctx.busy dir equal to or inside `dir`, a file changed in the last 24 hours,
  * or a recency scan that could not finish (limit `ctx.mtimeLimit`, default of newestMtimeInfo).
+ * gitSeen: the scan met a `.git` at some depth.
  */
-async function inUse(dir, ctx) {
-  if (ctx.busy.some((b) => isInside(b, dir))) return true;
-  const {newest, complete} = await newestMtimeInfo(dir, {limit: ctx.mtimeLimit});
-  return !complete || newest > ctx.now - DAY_MS;
+async function usage(dir, ctx) {
+  const {newest, complete, gitSeen} = await newestMtimeInfo(dir, {limit: ctx.mtimeLimit});
+  const busy = ctx.busy.some((b) => isInside(b, dir)) || !complete || newest > ctx.now - DAY_MS;
+  return {busy, gitSeen};
 }
 
 /**
@@ -122,21 +124,27 @@ export async function checkWorktree(repo, wt, {prs, base, current}, ctx) {
     }
   }
 
-  const status = await ctx.run('git', ['status', '--porcelain'], {cwd: wt.path});
+  // Every untracked file and submodule change counts, whatever the user's status settings hide.
+  const status = await ctx.run('git', ['status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none'],
+    {cwd: wt.path});
   if (status.code !== 0 || status.stdout.trim() !== '') return result('keep', 'reason.git_dirty');
   if (wt.locked) return result('keep', 'reason.git_locked');
-  if (await inUse(wt.path, ctx)) return result('keep', 'reason.git_busy');
+  if ((await usage(wt.path, ctx)).busy) return result('keep', 'reason.git_busy');
+
+  // Submodules hold their own commits and stashes: never safe, and delete leaves them to the user.
+  const submodules = await exists(path.join(wt.path, '.gitmodules'));
+  const deletable = (tag, reasonKey, params) => (submodules ? result('ask', 'reason.git_submodules') : result(tag, reasonKey, params));
 
   if (!wt.branch) {
     const remote = await ctx.run('git', ['branch', '-r', '--contains', wt.head], {cwd: repo});
-    if (remote.code === 0 && remote.stdout.trim() !== '') return result('safe', 'reason.git_detached_pushed');
+    if (remote.code === 0 && remote.stdout.trim() !== '') return deletable('safe', 'reason.git_detached_pushed');
     return result('keep', 'reason.git_local_commits');
   }
 
   if (info.keep) return result('keep', info.keep);
-  if (info.landed) return result('safe', 'reason.git_landed', info.mergedPr ? {pr: info.mergedPr.number} : {});
-  if (prs === null) return result('ask', 'reason.git_no_pr_data');
-  return result('ask', 'reason.git_unmerged');
+  if (info.landed) return deletable('safe', 'reason.git_landed', info.mergedPr ? {pr: info.mergedPr.number} : {});
+  if (prs === null) return deletable('ask', 'reason.git_no_pr_data');
+  return deletable('ask', 'reason.git_unmerged');
 }
 
 
@@ -211,9 +219,10 @@ export async function checkOrphan(entry, ctx) {
     return null;
   }
   if (st.isDirectory()) {
-    if (await inUse(entry, ctx)) return result('keep', 'reason.git_busy');
-    // A clone or a moved worktree may hold commits, stashes or changes.
-    if (await exists(path.join(entry, '.git'))) return result('ask', 'reason.git_orphan_repo');
+    const {busy, gitSeen} = await usage(entry, ctx);
+    if (busy) return result('keep', 'reason.git_busy');
+    // A clone or a moved worktree, at any depth, may hold commits, stashes or changes.
+    if (gitSeen || await exists(path.join(entry, '.git'))) return result('ask', 'reason.git_orphan_repo');
     return result('safe', 'reason.git_orphan');
   }
   if (st.isFile() && LOOSE_FILE.test(path.basename(entry))) return result('safe', 'reason.git_loose_log');

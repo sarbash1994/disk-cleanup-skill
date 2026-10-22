@@ -30,6 +30,7 @@ export const EN = {
   'reason.git_local_commits': 'has commits that are on no remote',
   'reason.git_orphan': 'folder that git does not know as a worktree',
   'reason.git_orphan_repo': 'folder that git does not know as a worktree, but it holds a .git: it may have commits, stashes or changes',
+  'reason.git_submodules': 'the worktree has submodules, which may hold their own commits and stashes; remove it by hand',
   'reason.git_loose_log': 'loose log file in the agent worktree folder',
   'reason.git_branch_count': '{count} landed local branches without a worktree',
   'reason.cache_clean': 'package cache, downloads again when needed',

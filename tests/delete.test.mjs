@@ -333,7 +333,7 @@ test('a worktree with submodules is skipped without trying to remove it', async 
   gitOut(repo, 'push', '-q', 'origin', 'main');
   const report = buildReport(await git.collect(later(), [repo]), [], {now: Date.now()});
   const id = idOf(report, wt);
-  assert.equal(report.groups[0].rows.find(r => r.id === id).tag, 'safe', 'fixture: safe in the report');
+  assert.equal(report.groups[0].rows.find(r => r.id === id).tag, 'ask', 'fixture: ask in the report');
   const calls = [];
   const run = async (cmd, args, opts) => { calls.push(args.join(' ')); return noGh(cmd, args, opts); };
   const [result] = await deleteRows(report, [id], later({run}));
@@ -501,4 +501,71 @@ test('delete with a row of unknown action shape exits 1 and deletes nothing', as
     (e) => e.code === 1 && /unknown format/.test(e.stderr),
   );
   assert.equal(await exists(path.join(temp, 'victim', 'a.txt')), true);
+});
+
+test('untracked files added after the report stop the delete even with status.showUntrackedFiles=no', async () => {
+  const {repo} = await gitRepoWithOrigin();
+  const wt = await addWorktree(repo, 'feat/landed', {commit: true, mergeIntoMainAndPush: true});
+  const report = buildReport(await git.collect(later(), [repo]), [], {now: Date.now()});
+  const id = idOf(report, wt);
+  assert.equal(report.groups[0].rows.find(r => r.id === id).tag, 'safe', 'fixture: safe in the report');
+  gitOut(repo, 'config', 'status.showUntrackedFiles', 'no');
+  await writeTree(wt, {'notes.txt': 'mine\n'});
+  const [result] = await deleteRows(report, [id], later());
+  assert.equal(result.status, 'skipped');
+  assert.match(result.message, /uncommitted changes/);
+  assert.equal(await exists(path.join(wt, 'notes.txt')), true);
+});
+
+test('a worktree that became dirty or locked after the report is skipped', async () => {
+  const {repo} = await gitRepoWithOrigin();
+  const dirty = await addWorktree(repo, 'feat/dirty', {commit: true, mergeIntoMainAndPush: true});
+  const locked = await addWorktree(repo, 'feat/locked', {commit: true, mergeIntoMainAndPush: true});
+  const report = buildReport(await git.collect(later(), [repo]), [], {now: Date.now()});
+  for (const p of [dirty, locked]) assert.equal(report.groups[0].rows.find(r => r.path === p).tag, 'safe', 'fixture');
+  await writeTree(dirty, {'README.md': 'edited\n'});
+  gitOut(repo, 'worktree', 'lock', locked);
+  const results = await deleteRows(report, [idOf(report, dirty), idOf(report, locked)], later());
+  assert.equal(byId(results, idOf(report, dirty)).status, 'skipped');
+  assert.match(byId(results, idOf(report, dirty)).message, /uncommitted changes/);
+  assert.equal(byId(results, idOf(report, locked)).status, 'skipped');
+  assert.match(byId(results, idOf(report, locked)).message, /locked/);
+  assert.equal(await exists(dirty), true);
+  assert.equal(await exists(locked), true);
+});
+
+test('an orphan seen as safe that gained a .git since the report is skipped', async () => {
+  const {repo} = await gitRepoWithOrigin();
+  await writeTree(repo, {'.claude/worktrees/ghost/a.js': '1'});
+  const ghost = path.join(repo, '.claude', 'worktrees', 'ghost');
+  const report = buildReport(await git.collect(later(), [repo]), [], {now: Date.now()});
+  assert.equal(report.groups[0].rows.find(r => r.path === ghost).tag, 'safe', 'fixture');
+  await writeTree(ghost, {'deep/clone/.git/HEAD': 'ref: refs/heads/main\n'});
+  const [result] = await deleteRows(report, [idOf(report, ghost)], later());
+  assert.equal(result.status, 'skipped');
+  assert.match(result.message, /holds a \.git/);
+  assert.equal(await exists(path.join(ghost, 'a.js')), true);
+});
+
+test('a squash-merged worktree stays deletable after fetch --prune removes its remote branch', async () => {
+  const {repo, origin} = await gitRepoWithOrigin();
+  const wt = await addWorktree(repo, 'feat/sq', {commit: true, push: true});
+  await writeTree(wt, {'second.txt': '2\n'});
+  gitOut(wt, 'add', '-A');
+  gitOut(wt, 'commit', '-q', '-m', 'second');
+  gitOut(wt, 'push', '-q', 'origin', 'feat/sq');
+  const tip = gitOut(wt, 'rev-parse', 'HEAD').trim();
+  gitOut(repo, 'merge', '-q', '--squash', 'feat/sq');
+  gitOut(repo, 'commit', '-q', '-m', 'squash feat/sq');
+  gitOut(repo, 'push', '-q', 'origin', 'main');
+  const prs = JSON.stringify([{number: 12, state: 'MERGED', headRefName: 'feat/sq', headRefOid: tip}]);
+  const run = async (cmd, args, opts) => (cmd === 'gh' ? {code: 0, stdout: prs, stderr: ''} : realRun(cmd, args, opts));
+  const report = buildReport(await git.collect(later({run}), [repo]), [], {now: Date.now()});
+  const id = idOf(report, wt);
+  assert.equal(report.groups[0].rows.find(r => r.id === id).tag, 'safe', 'safe at report time');
+  // GitHub deletes the head branch after the merge; delete's fetch --prune then drops origin/feat/sq.
+  gitOut(origin, 'branch', '-D', 'feat/sq');
+  const [result] = await deleteRows(report, [id], later({run}));
+  assert.equal(result.status, 'deleted', result.message);
+  assert.equal(await exists(wt), false);
 });

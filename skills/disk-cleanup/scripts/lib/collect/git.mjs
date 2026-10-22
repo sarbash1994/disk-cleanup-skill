@@ -10,7 +10,7 @@ const LOOSE_FILE = /\.(log|txt)$/i;
 // Paths compare case-insensitively everywhere: a false match only keeps more, never deletes more.
 const fold = (p) => path.resolve(p).toLowerCase();
 
-function isInside(child, parent) {
+export function isInside(child, parent) {
   const rel = path.relative(fold(parent), fold(child));
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }

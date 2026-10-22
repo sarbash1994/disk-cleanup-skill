@@ -51,6 +51,7 @@ Manual install for Claude Code: copy `skills/disk-cleanup/` into `.claude/skills
 
 - Node.js 18.15 or newer. No dependencies.
 - `git`.
+- Time: on large machines (many projects and worktrees, especially on Windows) the report can take two to four minutes. Progress lines show it is working.
 - `gh` (optional), logged in to an account that can read the repositories' PRs. Without it, unmerged pushed branches go to ask.
 
 ## Scope

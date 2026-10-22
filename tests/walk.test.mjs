@@ -36,12 +36,15 @@ test('newestMtime ignores node_modules', async () => {
   const old = new Date('2026-01-01'); await fs.utimes(path.join(d, 'src/a.js'), old, old);
   assert.equal(await newestMtime(d, {}), old.getTime());
 });
-test('newestMtime returns 0 for an empty or missing folder and honours limit', async () => {
+test('newestMtime returns 0 for an empty or missing folder', async () => {
   const d = await tmpdir();
   assert.equal(await newestMtime(d, {}), 0);
   assert.equal(await newestMtime(path.join(d, 'nope'), {}), 0);
-  await writeTree(d, {'a': '1', 'b': '2', 'c': '3'});
-  const t = new Date('2026-02-02');
-  for (const f of ['a', 'b', 'c']) await fs.utimes(path.join(d, f), t, t);
-  assert.equal(await newestMtime(d, {limit: 1}), t.getTime());
+});
+test('newestMtime stops after limit entries', async () => {
+  const d = await tmpdir(); await writeTree(d, {'x/new.txt': '1'});
+  const t = new Date('2026-02-02'); await fs.utimes(path.join(d, 'x/new.txt'), t, t);
+  assert.equal(await newestMtime(d, {}), t.getTime());
+  // The root's only entry `x` uses up the limit before x is descended.
+  assert.equal(await newestMtime(d, {limit: 1}), 0);
 });

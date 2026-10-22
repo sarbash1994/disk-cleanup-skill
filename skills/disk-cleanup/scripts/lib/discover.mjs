@@ -23,7 +23,8 @@ function isInside(child, parent, ctx) {
 }
 
 /**
- * Folders under `roots` that contain `.git` (folder or file), outermost only.
+ * Folders under `roots` that contain `.git` (folder or file), outermost only; a root that is itself a repo is
+ * returned and still searched below.
  * @param {string[]} roots
  * @param {object} ctx
  * @param {{maxDepth?: number}} [opts]
@@ -39,7 +40,7 @@ export async function findRepos(roots, ctx, {maxDepth = 8} = {}) {
   const found = new Set();
   const seen = new Set();
 
-  async function visit(dir, depth) {
+  async function visit(dir, depth, isRoot = false) {
     const key = f(dir);
     if (seen.has(key)) return;
     seen.add(key);
@@ -51,7 +52,7 @@ export async function findRepos(roots, ctx, {maxDepth = 8} = {}) {
     }
     if (entries.some((e) => e.name === '.git')) {
       found.add(dir);
-      return;
+      if (!isRoot) return; // a scan root may itself be a repo; repos below it still count
     }
     if (depth >= maxDepth) return;
     const atRoot = path.parse(dir).root === dir;
@@ -63,7 +64,7 @@ export async function findRepos(roots, ctx, {maxDepth = 8} = {}) {
     await Promise.all(subdirs.map((e) => visit(path.join(dir, e.name), depth + 1)));
   }
 
-  for (const root of roots) await visit(root, 0);
+  for (const root of roots) await visit(root, 0, true);
   return [...found];
 }
 

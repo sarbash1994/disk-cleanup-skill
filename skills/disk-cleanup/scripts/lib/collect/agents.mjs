@@ -19,7 +19,10 @@ export const AGENT_TEMP = [
  * @returns {Promise<{tag:'safe'|'ask', reasonKey:string, params:object}>}
  */
 export async function checkAgentTemp(dir, ctx) {
-  const {newest, complete} = await newestMtimeInfo(dir, {limit: ctx.mtimeLimit});
+  const info = await newestMtimeInfo(dir, {limit: ctx.mtimeLimit});
+  const {complete} = info;
+  // An empty folder has no files to date, so its own mtime counts too.
+  const newest = Math.max(info.newest, (await fs.stat(dir).catch(() => null))?.mtimeMs ?? 0);
   const busy = ctx.busy.some((b) => isInside(b, dir)) || !complete || newest > ctx.now - DAY_MS;
   if (busy) return {tag: 'ask', reasonKey: 'reason.agent_busy', params: {}};
   return {tag: 'safe', reasonKey: 'reason.agent_old', params: {days: Math.max(0, Math.floor((ctx.now - newest) / DAY_MS))}};

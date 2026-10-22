@@ -18,7 +18,7 @@ import * as heavy from './lib/collect/heavy.mjs';
 
 const USAGE = 'Usage: node scan.mjs <strings|report|delete>';
 const MEASURE_PARALLEL = 4;
-const MEASURE_TIMEOUT_MS = 20_000;
+const MEASURE_TIMEOUT_MS = 60_000;
 const DAY_MS = 86_400_000;
 
 /** `--flag a b c` collects values up to the next `--flag`. */

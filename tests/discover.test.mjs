@@ -84,3 +84,10 @@ test('defaultRoots takes Windows drives from ctx.drives only', async () => {
   assert.ok((await defaultRoots(fakeCtx({home, platform: 'win32', drives: [drive]}))).includes(drive));
   assert.deepEqual(await defaultRoots(fakeCtx({home, platform: 'win32'})), [home]);
 });
+
+test('findRepos returns a root that is itself a repo and still searches below it', async () => {
+  const r = await tmpdir();
+  await writeTree(r, {'.git/HEAD': 'x', 'a/.git/HEAD': 'x', 'b/c/.git/HEAD': 'x'});
+  const found = (await findRepos([r], fakeCtx({platform: 'linux'}))).map(p => path.relative(r, p)).sort();
+  assert.deepEqual(found, ['', 'a', path.join('b', 'c')]);
+});

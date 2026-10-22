@@ -7,7 +7,7 @@ export const EN = {
   'disk_free': '{free} free of {total}',
   'group.projects': 'Projects',
   'group.caches': 'Package caches',
-  'group.browsers': 'Browser downloads',
+  'group.browsers': 'Test browsers',
   'group.agents': 'Agent temp folders',
   'group.heavy': 'Heavy tools',
   'tag.safe': 'safe',

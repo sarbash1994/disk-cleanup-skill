@@ -83,3 +83,15 @@ test('Android AVDs and SDK from env or platform default', async () => {
   assert.ok(dflt.some(r => r.path === path.join(home, 'Android', 'Sdk')));
   assert.equal((await fs.stat(sdk)).isDirectory(), true);
 });
+test('Claude temp: an empty folder is dated by its own mtime', async () => {
+  const tmp = await tmpdir();
+  await fs.mkdir(path.join(tmp, 'claude/empty-old'), {recursive: true});
+  await fs.mkdir(path.join(tmp, 'claude/empty-new'), {recursive: true});
+  const old = new Date(Date.now() - 3 * 86400000);
+  await fs.utimes(path.join(tmp, 'claude/empty-old'), old, old);
+  const rows = await agents.collect(fakeCtx({tmp, now: Date.now()}));
+  const oldRow = rows.find(r => r.path.endsWith('empty-old'));
+  assert.equal(oldRow.tag, 'safe');
+  assert.equal(oldRow.reason.params.days, 3);
+  assert.equal(rows.find(r => r.path.endsWith('empty-new')).tag, 'ask');
+});

@@ -1,6 +1,6 @@
 # Disk report and cleanup: design
 
-Date: 2026-10-22. Status: draft, awaiting owner approval.
+Date: 2026-10-22. Status: approved by the owner on 2026-10-22.
 
 ## Intent
 

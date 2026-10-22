@@ -40,6 +40,8 @@ Show the user the exact list of branches that passed, and run `git push origin -
 
 Relay the script's result lines: freed space per group and free space per disk.
 
+The delete output, the old-report notice included, is in English: when the user writes in another language, translate it before relaying it, keeping paths, sizes and row numbers as they are.
+
 ## Rules
 
 - Delete only rows the report lists. The one exception: remote branches the user asked for, checked and confirmed as in step 5.

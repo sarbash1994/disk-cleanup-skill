@@ -1,3 +1,5 @@
+import {execFileSync} from 'node:child_process';
+import {makeContext} from '../skills/disk-cleanup/scripts/lib/ctx.mjs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -45,4 +47,37 @@ export function fakeCtx(overrides = {}) {
     run: async () => ({code: null, stdout: '', stderr: ''}),
     ...overrides,
   };
+}
+
+/** Real command runner (same one the CLI uses), for tests that need git. */
+export const realRun = makeContext({}).run;
+
+/**
+ * Creates a git repo in a fresh temporary folder with one commit made at commitDate.
+ * `files` is a writeTree tree. Returns the repo path.
+ */
+export async function gitRepo({files, commitDate}) {
+  const repo = await tmpdir();
+  const env = {...process.env, GIT_AUTHOR_DATE: commitDate, GIT_COMMITTER_DATE: commitDate};
+  const git = (...args) => execFileSync('git', args, {cwd: repo, env, stdio: 'pipe'});
+  git('init', '-q');
+  git('config', 'user.name', 'Test');
+  git('config', 'user.email', 'test@example.com');
+  git('config', 'commit.gpgsign', 'false');
+  await writeTree(repo, files);
+  git('add', '-A');
+  git('commit', '-q', '-m', 'init');
+  return repo;
+}
+
+/** Sets atime and mtime of dir and everything under it (symlinks are not followed). */
+export async function setAllMtimes(dir, date) {
+  const entries = await fs.readdir(dir, {withFileTypes: true});
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isSymbolicLink()) continue;
+    if (entry.isDirectory()) await setAllMtimes(full, date);
+    else await fs.utimes(full, date, date);
+  }
+  await fs.utimes(dir, date, date);
 }

@@ -17,6 +17,7 @@ export const EN = {
   'size_unknown': 'size unknown',
   'reason.nm_old': 'untouched for {days} days, reinstalls with the lockfile',
   'reason.nm_recent': 'project touched {days} days ago',
+  'reason.build_ignored': 'build output, ignored by git, rebuilds',
   'answer_hint': 'Reply in chat with row numbers, for example 1, 3, 5-8',
 };
 

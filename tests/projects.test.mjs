@@ -65,3 +65,18 @@ test('git missing: node_modules still listed, build outputs are not', async () =
   assert.deepEqual(rows.map(r => path.basename(r.path)), ['node_modules']);
   assert.equal(rows[0].tag, 'safe');
 });
+
+test('home as a repo: no node_modules or build-output rows for its personal folders', async () => {
+  const home = await gitRepo({files: {'README.md': 'dotfiles\n'}, commitDate: '2026-08-01T00:00:00Z'});
+  await writeTree(home, {'.gitignore': '*\n', 'package.json': '{}', 'build/notes.txt': 'mine', 'node_modules/x/i.js': '1'});
+  await setAllMtimes(home, new Date('2026-08-01'));
+  const rows = await collect(fakeCtx({now: Date.parse('2026-10-22'), run: realRun, home}), [home]);
+  assert.deepEqual(rows, []);
+});
+
+test('build-output rows only for a repo with a top-level package.json', async () => {
+  const repo = await gitRepo({files: {'.gitignore': 'build\n'}, commitDate: '2026-08-01T00:00:00Z'});
+  await writeTree(repo, {'build/notes.txt': 'not a JS build'});
+  await setAllMtimes(repo, new Date('2026-08-01'));
+  assert.deepEqual(await collect(ctxAt('2026-10-22'), [repo]), []);
+});

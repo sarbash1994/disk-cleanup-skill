@@ -52,7 +52,7 @@ test('makeRow applies defaults', () => {
 
 test('makeContext run resolves code null for a missing command and never throws', async () => {
   const ctx = makeContext({busy: ['a']});
-  assert.deepEqual(ctx.busy, ['a']);
+  assert.deepEqual(ctx.busy, ['a', process.cwd()]);
   const missing = await ctx.run('definitely-not-a-real-command-xyz', []);
   assert.equal(missing.code, null);
   const ok = await ctx.run(process.execPath, ['-e', 'process.stdout.write("hi")']);

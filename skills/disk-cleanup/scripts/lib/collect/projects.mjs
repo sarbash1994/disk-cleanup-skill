@@ -44,8 +44,23 @@ async function workspaceNodeModules(repo) {
   return found;
 }
 
+async function isFile(p) {
+  try {
+    return (await fs.lstat(p)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+// Case folds: a false match only lists fewer rows.
+const fold = (p) => path.resolve(p).toLowerCase();
+
+/** Home or a filesystem root under git: its folders are the user's own, not a project's. */
+const isPersonalRoot = (ctx, repo) => fold(repo) === fold(ctx.home) || path.parse(path.resolve(repo)).root === path.resolve(repo);
+
 async function collectRepo(ctx, repo) {
   const rows = [];
+  if (isPersonalRoot(ctx, repo)) return rows;
   const name = path.basename(repo);
 
   const nmDirs = [];
@@ -69,6 +84,8 @@ async function collectRepo(ctx, repo) {
     }
   }
 
+  // Build outputs are a JS project's; elsewhere `build` or `out` may be the user's own folder.
+  if (!await isFile(path.join(repo, 'package.json'))) return rows;
   for (const dirName of BUILD_DIRS) {
     const dir = path.join(repo, dirName);
     if (!await isDir(dir)) continue;
@@ -88,6 +105,7 @@ async function collectRepo(ctx, repo) {
 
 /**
  * node_modules (top level and workspace packages) and git-ignored build outputs of each repo.
+ * None for a repo at home or a filesystem root; build outputs only next to a top-level package.json.
  * @param {object} ctx
  * @param {string[]} repos absolute repo folders
  * @returns {Promise<import('../row.mjs').Row[]>}

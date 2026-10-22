@@ -1,6 +1,6 @@
 ---
 name: git-cleanup
-description: Clean up what coding-agent sessions left behind in a git repository: linked worktrees, local branches whose work is already in the default branch, orphaned worktree folders and loose logs. Builds a report first and deletes only the groups the user approves.
+description: "Clean up what coding-agent sessions left behind in a git repository: linked worktrees, local branches whose work is already in the default branch, orphaned worktree folders and loose logs. Builds a report first and deletes only the groups the user approves."
 disable-model-invocation: true
 ---
 

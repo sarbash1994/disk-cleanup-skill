@@ -74,7 +74,7 @@ test('PR data: open PR keep, closed PR ask, merged PR safe with its number', asy
   const prs = [
     {number: 7, state: 'OPEN', headRefName: 'feat/open'},
     {number: 8, state: 'CLOSED', headRefName: 'feat/closed'},
-    {number: 9, state: 'MERGED', headRefName: 'feat/merged'},
+    {number: 9, state: 'MERGED', headRefName: 'feat/merged', headRefOid: git(merged, 'rev-parse', 'HEAD').trim()},
   ];
   const rows = await collect(later({run: withPrs(prs)}), [repo]);
   assert.equal(rowAt(rows, open).tag, 'keep', 'an open PR keeps even a landed branch');
@@ -198,4 +198,75 @@ test('checkWorktree re-checks a row: a new local commit turns safe into keep', a
   git(wt, 'commit', '-q', '-m', 'more');
   assert.deepEqual(await checkWorktree(repo, await entry(), opts, later()),
     {tag: 'keep', reasonKey: 'reason.git_local_commits', params: {}});
+});
+
+test('a MERGED PR lands a branch only when the local tip is the PR head or behind it', async () => {
+  const {repo} = await gitRepoWithOrigin();
+  // feat/x: PR #9 merged at commit A, then a new commit B pushed to the same branch name.
+  const moved = await addWorktree(repo, 'feat/x', {commit: true, push: true});
+  const prHead = git(moved, 'rev-parse', 'HEAD').trim();
+  await writeTree(moved, {'b.txt': 'b'});
+  git(moved, 'add', 'b.txt');
+  git(moved, 'commit', '-q', '-m', 'B');
+  git(moved, 'push', '-q', 'origin', 'feat/x');
+  // feat/behind: PR head is one commit ahead of the local tip.
+  const behind = await addWorktree(repo, 'feat/behind', {commit: true});
+  await writeTree(behind, {'c.txt': 'c'});
+  git(behind, 'add', 'c.txt');
+  git(behind, 'commit', '-q', '-m', 'C');
+  git(behind, 'push', '-q', 'origin', 'feat/behind');
+  const behindHead = git(behind, 'rev-parse', 'HEAD').trim();
+  git(behind, 'reset', '-q', '--hard', 'HEAD~1');
+  // feat/gone: the PR head commit is not present locally.
+  const gone = await addWorktree(repo, 'feat/gone', {commit: true, push: true});
+  const prs = [
+    {number: 9, state: 'MERGED', headRefName: 'feat/x', headRefOid: prHead},
+    {number: 10, state: 'MERGED', headRefName: 'feat/behind', headRefOid: behindHead},
+    {number: 11, state: 'MERGED', headRefName: 'feat/gone', headRefOid: 'f'.repeat(40)},
+  ];
+  const rows = await collect(later({run: withPrs(prs)}), [repo]);
+  assert.equal(rowAt(rows, moved).tag, 'ask');
+  assert.equal(rowAt(rows, moved).reason.key, 'reason.git_unmerged');
+  assert.deepEqual(rowAt(rows, behind).reason, {key: 'reason.git_landed', params: {pr: 10}});
+  assert.equal(rowAt(rows, behind).tag, 'safe');
+  assert.equal(rowAt(rows, gone).tag, 'ask');
+  const opts = {prs, base: 'origin/main', current: 'main'};
+  assert.deepEqual(await classifyBranch(repo, 'feat/x', opts, later()), {landed: false, keep: null});
+});
+
+test('an orphan folder that is busy, fresh or holds .git is not safe', async () => {
+  const {repo} = await gitRepoWithOrigin();
+  await writeTree(repo, {
+    '.claude/worktrees/busy/a.js': '1',
+    '.claude/worktrees/clone/.git/HEAD': 'ref: refs/heads/main\n',
+    '.claude/worktrees/clone/src.js': '1',
+    '.claude/worktrees/moved/.git': 'gitdir: /somewhere/else\n',
+    '.claude/worktrees/moved/src.js': '1',
+  });
+  const p = name => path.join(repo, '.claude', 'worktrees', name);
+  const rows = await collect(later({busy: [path.join(p('busy'), 'src')]}), [repo]);
+  assert.deepEqual(rowAt(rows, p('busy')).reason.key, 'reason.git_busy');
+  assert.equal(rowAt(rows, p('busy')).tag, 'keep');
+  assert.equal(rowAt(rows, p('clone')).tag, 'ask');
+  assert.equal(rowAt(rows, p('clone')).reason.key, 'reason.git_orphan_repo');
+  assert.equal(rowAt(rows, p('moved')).tag, 'ask');
+  assert.equal(rowAt(rows, p('moved')).reason.key, 'reason.git_orphan_repo');
+  const fresh = await collect(fakeCtx({now: Date.now(), run: realRun}), [repo]);
+  for (const name of ['busy', 'clone', 'moved']) {
+    assert.equal(rowAt(fresh, p(name)).tag, 'keep', `${name} changed in the last 24 h`);
+    assert.equal(rowAt(fresh, p(name)).reason.key, 'reason.git_busy');
+  }
+});
+
+test('an incomplete recency scan counts as in use', async () => {
+  const {repo} = await gitRepoWithOrigin();
+  const wt = await addWorktree(repo, 'feat/landed', {commit: true, mergeIntoMainAndPush: true});
+  await writeTree(repo, {'.claude/worktrees/ghost/a.js': '1', '.claude/worktrees/ghost/b.js': '2'});
+  const rows = await collect(later({mtimeLimit: 1}), [repo]);
+  assert.equal(rowAt(rows, wt).tag, 'keep');
+  assert.equal(rowAt(rows, wt).reason.key, 'reason.git_busy');
+  const ghost = path.join(repo, '.claude', 'worktrees', 'ghost');
+  assert.equal(rowAt(rows, ghost).tag, 'keep');
+  assert.equal(rowAt(rows, ghost).reason.key, 'reason.git_busy');
+  assert.equal(rowAt(await collect(later(), [repo]), wt).tag, 'safe', 'safe with the default limit');
 });

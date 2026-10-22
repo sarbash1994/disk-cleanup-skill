@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {tmpdir, writeTree} from './helpers.mjs';
-import {measureSize, newestMtime} from '../skills/disk-cleanup/scripts/lib/walk.mjs';
+import {measureSize, newestMtime, newestMtimeInfo} from '../skills/disk-cleanup/scripts/lib/walk.mjs';
 
 test('measureSize sums files and counts a hard link once', async () => {
   const d = await tmpdir(); await writeTree(d, {'a.txt': 'x'.repeat(1000), 'sub/b.txt': 'y'.repeat(500)});
@@ -47,4 +47,14 @@ test('newestMtime stops after limit entries', async () => {
   assert.equal(await newestMtime(d, {}), t.getTime());
   // The root's only entry `x` uses up the limit before x is descended.
   assert.equal(await newestMtime(d, {limit: 1}), 0);
+});
+test('newestMtimeInfo is complete for a small tree, incomplete at the limit or for a missing root', async () => {
+  const d = await tmpdir(); await writeTree(d, {'x/new.txt': '1', 'y.txt': '2'});
+  const t = new Date('2026-02-02'); await fs.utimes(path.join(d, 'x/new.txt'), t, t);
+  await fs.utimes(path.join(d, 'y.txt'), new Date('2026-01-01'), new Date('2026-01-01'));
+  assert.deepEqual(await newestMtimeInfo(d, {}), {newest: t.getTime(), complete: true});
+  assert.equal((await newestMtimeInfo(d, {limit: 1})).complete, false);
+  assert.deepEqual(await newestMtimeInfo(path.join(d, 'nope'), {}), {newest: 0, complete: false});
+  const empty = await tmpdir();
+  assert.deepEqual(await newestMtimeInfo(empty, {}), {newest: 0, complete: true});
 });

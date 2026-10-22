@@ -29,6 +29,7 @@ export const EN = {
   'reason.git_busy': 'in use: a session runs here or a file changed in the last 24 hours',
   'reason.git_local_commits': 'has commits that are on no remote',
   'reason.git_orphan': 'folder that git does not know as a worktree',
+  'reason.git_orphan_repo': 'folder that git does not know as a worktree, but it holds a .git: it may have commits, stashes or changes',
   'reason.git_loose_log': 'loose log file in the agent worktree folder',
   'reason.git_branch_count': '{count} landed local branches without a worktree',
   'answer_hint': 'Reply in chat with row numbers, for example 1, 3, 5-8',

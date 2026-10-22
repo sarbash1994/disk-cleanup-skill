@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {makeRow} from '../row.mjs';
-import {newestMtime} from '../walk.mjs';
+import {newestMtimeInfo} from '../walk.mjs';
 
 const DAY_MS = 86_400_000;
 const AGENT_DIRS = [['.claude', 'worktrees'], ['.worktrees']];
@@ -42,21 +42,34 @@ export async function listWorktrees(repo, ctx) {
 }
 
 const prsOf = (prs, branch) => (prs ?? []).filter((p) => p && p.headRefName === branch);
+const SHA = /^[0-9a-f]{7,64}$/i;
 
 /**
- * Branch-level rules. `keep` is the first branch-level keep reason
- * (default or current branch, open PR, commits on no remote unless cherry-landed), or null.
- * @param {{prs: object[]|null, base: string, current: string|null}} opts
- * @returns {Promise<{landed:boolean, keep:string|null}>}
+ * The MERGED PR of `branch` whose head is the local tip or a descendant of it, or null.
+ * A PR head that is not present locally proves nothing.
  */
-export async function classifyBranch(repo, branch, {prs, base, current}, ctx) {
+async function verifiedMergedPr(repo, branch, prs, ctx) {
+  const merged = prsOf(prs, branch).filter((p) => p.state === 'MERGED' && typeof p.headRefOid === 'string' && SHA.test(p.headRefOid));
+  if (!merged.length) return null;
+  const tipRes = await ctx.run('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], {cwd: repo});
+  const tip = tipRes.code === 0 ? tipRes.stdout.trim() : '';
+  if (!tip) return null;
+  for (const pr of merged) {
+    if (pr.headRefOid.toLowerCase() === tip.toLowerCase()) return pr;
+    const res = await ctx.run('git', ['merge-base', '--is-ancestor', tip, pr.headRefOid], {cwd: repo});
+    if (res.code === 0) return pr;
+  }
+  return null;
+}
+
+async function classify(repo, branch, {prs, base, current}, ctx) {
   const ref = `refs/heads/${branch}`;
   const own = prsOf(prs, branch);
-  const merged = own.some((p) => p.state === 'MERGED');
+  const mergedPr = await verifiedMergedPr(repo, branch, prs, ctx);
   const ancestor = (await ctx.run('git', ['merge-base', '--is-ancestor', ref, base], {cwd: repo})).code === 0;
   const cherry = await ctx.run('git', ['cherry', base, ref], {cwd: repo});
   const cherryLanded = cherry.code === 0 && !cherry.stdout.split(/\r?\n/).some((l) => l.startsWith('+'));
-  const landed = merged || ancestor || cherryLanded;
+  const landed = Boolean(mergedPr) || ancestor || cherryLanded;
 
   const defaultBranch = base.slice(base.indexOf('/') + 1);
   let keep = null;
@@ -67,7 +80,29 @@ export async function classifyBranch(repo, branch, {prs, base, current}, ctx) {
     // A failed git log cannot prove the commits are pushed.
     if (local.code !== 0 || local.stdout.trim() !== '') keep = 'reason.git_local_commits';
   }
+  return {landed, keep, mergedPr};
+}
+
+/**
+ * Branch-level rules. `keep` is the first branch-level keep reason
+ * (default or current branch, open PR, commits on no remote unless cherry-landed), or null.
+ * A MERGED PR lands the branch only when its headRefOid is the local tip or descends from it.
+ * @param {{prs: object[]|null, base: string, current: string|null}} opts
+ * @returns {Promise<{landed:boolean, keep:string|null}>}
+ */
+export async function classifyBranch(repo, branch, opts, ctx) {
+  const {landed, keep} = await classify(repo, branch, opts, ctx);
   return {landed, keep};
+}
+
+/**
+ * In use: a ctx.busy dir equal to or inside `dir`, a file changed in the last 24 hours,
+ * or a recency scan that could not finish (limit `ctx.mtimeLimit`, default of newestMtimeInfo).
+ */
+async function inUse(dir, ctx) {
+  if (ctx.busy.some((b) => isInside(b, dir))) return true;
+  const {newest, complete} = await newestMtimeInfo(dir, {limit: ctx.mtimeLimit});
+  return !complete || newest > ctx.now - DAY_MS;
 }
 
 /**
@@ -80,7 +115,7 @@ export async function checkWorktree(repo, wt, {prs, base, current}, ctx) {
   const result = (tag, reasonKey, params = {}) => ({tag, reasonKey, params});
   let info = null;
   if (wt.branch) {
-    info = await classifyBranch(repo, wt.branch, {prs, base, current}, ctx);
+    info = await classify(repo, wt.branch, {prs, base, current}, ctx);
     if (info.keep === 'reason.git_current') return result('keep', info.keep);
     if (info.keep === 'reason.git_open_pr') {
       return result('keep', info.keep, {pr: prsOf(prs, wt.branch).find((p) => p.state === 'OPEN').number});
@@ -90,8 +125,7 @@ export async function checkWorktree(repo, wt, {prs, base, current}, ctx) {
   const status = await ctx.run('git', ['status', '--porcelain'], {cwd: wt.path});
   if (status.code !== 0 || status.stdout.trim() !== '') return result('keep', 'reason.git_dirty');
   if (wt.locked) return result('keep', 'reason.git_locked');
-  if (ctx.busy.some((dir) => isInside(dir, wt.path))
-      || await newestMtime(wt.path) > ctx.now - DAY_MS) return result('keep', 'reason.git_busy');
+  if (await inUse(wt.path, ctx)) return result('keep', 'reason.git_busy');
 
   if (!wt.branch) {
     const remote = await ctx.run('git', ['branch', '-r', '--contains', wt.head], {cwd: repo});
@@ -100,13 +134,11 @@ export async function checkWorktree(repo, wt, {prs, base, current}, ctx) {
   }
 
   if (info.keep) return result('keep', info.keep);
-  if (info.landed) {
-    const mergedPr = prsOf(prs, wt.branch).find((p) => p.state === 'MERGED');
-    return result('safe', 'reason.git_landed', mergedPr ? {pr: mergedPr.number} : {});
-  }
+  if (info.landed) return result('safe', 'reason.git_landed', info.mergedPr ? {pr: info.mergedPr.number} : {});
   if (prs === null) return result('ask', 'reason.git_no_pr_data');
   return result('ask', 'reason.git_unmerged');
 }
+
 
 /** `origin/HEAD` target, else origin/main, else origin/master; null without such a remote branch. */
 async function findBase(repo, ctx) {
@@ -120,7 +152,7 @@ async function findBase(repo, ctx) {
 }
 
 async function fetchPrs(repo, ctx) {
-  const res = await ctx.run('gh', ['pr', 'list', '--state', 'all', '--limit', '500', '--json', 'number,state,headRefName'],
+  const res = await ctx.run('gh', ['pr', 'list', '--state', 'all', '--limit', '500', '--json', 'number,state,headRefName,headRefOid'],
     {cwd: repo});
   if (res.code !== 0) return null;
   try {
@@ -200,9 +232,14 @@ async function collectRepo(ctx, repo) {
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
       let reasonKey = null;
+      let tag = 'safe';
       if (entry.isDirectory()) {
         const known = knownNames.has(entry.name.toLowerCase()) || worktrees.some((wt) => isInside(wt.path, full));
-        if (!known) reasonKey = 'reason.git_orphan';
+        if (known) continue;
+        if (await inUse(full, ctx)) [tag, reasonKey] = ['keep', 'reason.git_busy'];
+        // A clone or a moved worktree may hold commits, stashes or changes.
+        else if (await exists(path.join(full, '.git'))) [tag, reasonKey] = ['ask', 'reason.git_orphan_repo'];
+        else reasonKey = 'reason.git_orphan';
       } else if (entry.isFile() && LOOSE_FILE.test(entry.name)) {
         reasonKey = 'reason.git_loose_log';
       }
@@ -211,7 +248,7 @@ async function collectRepo(ctx, repo) {
         group: 'projects',
         label: `${name}/${rel}/${entry.name}`,
         path: full,
-        tag: 'safe',
+        tag,
         reason: {key: reasonKey, params: {}},
         action: {type: 'rm', path: full},
       }));

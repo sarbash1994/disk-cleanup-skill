@@ -67,9 +67,17 @@ export async function measureSize(dir, {deadline}) {
 
 /**
  * Newest modification time (ms) of files under dir, not descending into folders
- * named in `skip`, looking at no more than `limit` entries. 0 when nothing is found.
+ * named in `skip`, looking at no more than `limit` entries. newest is 0 when nothing is found.
+ * complete is false when the root cannot be read or the limit was reached
+ * (reaching it counts as incomplete even if nothing was left).
+ * @returns {Promise<{newest: number, complete: boolean}>}
  */
-export async function newestMtime(dir, {skip = ['node_modules', '.git'], limit = 20000} = {}) {
+export async function newestMtimeInfo(dir, {skip = ['node_modules', '.git'], limit = 20000} = {}) {
+  try {
+    await (await fs.opendir(dir)).close();
+  } catch {
+    return {newest: 0, complete: false};
+  }
   const skipped = new Set(skip);
   const stack = [dir];
   let newest = 0;
@@ -97,5 +105,10 @@ export async function newestMtime(dir, {skip = ['node_modules', '.git'], limit =
       if (looked >= limit) break;
     }
   }
-  return newest;
+  return {newest, complete: looked < limit};
+}
+
+/** newestMtimeInfo without the completeness flag. */
+export async function newestMtime(dir, opts) {
+  return (await newestMtimeInfo(dir, opts)).newest;
 }

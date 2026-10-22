@@ -11,6 +11,7 @@ import {listDisks} from './lib/disks.mjs';
 import {defaultRoots, findRepos} from './lib/discover.mjs';
 import {buildReport, formatBytes, renderHtml, renderSummary} from './lib/report.mjs';
 import {deleteRows, parseIds} from './lib/delete.mjs';
+import {parseFlags} from './lib/flags.mjs';
 import * as projects from './lib/collect/projects.mjs';
 import * as git from './lib/collect/git.mjs';
 import * as caches from './lib/collect/caches.mjs';
@@ -22,21 +23,6 @@ const USAGE = 'Usage: node scan.mjs <strings|report|delete>';
 const MEASURE_PARALLEL = 4;
 const MEASURE_TIMEOUT_MS = 60_000;
 const DAY_MS = 86_400_000;
-
-/** `--flag a b c` collects values up to the next `--flag`. */
-function parseFlags(args) {
-  const flags = {};
-  let current = null;
-  for (const arg of args) {
-    if (arg.startsWith('--')) {
-      current = arg.slice(2);
-      flags[current] = [];
-    } else if (current) {
-      flags[current].push(arg);
-    }
-  }
-  return flags;
-}
 
 const progress = (group, n, total) => process.stderr.write(`progress: ${group} ${n}/${total}\n`);
 

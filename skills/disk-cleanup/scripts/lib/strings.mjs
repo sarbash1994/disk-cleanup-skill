@@ -32,6 +32,10 @@ export const EN = {
   'reason.git_orphan_repo': 'folder that git does not know as a worktree, but it holds a .git: it may have commits, stashes or changes',
   'reason.git_loose_log': 'loose log file in the agent worktree folder',
   'reason.git_branch_count': '{count} landed local branches without a worktree',
+  'reason.cache_clean': 'package cache, downloads again when needed',
+  'reason.pnpm_prune': 'frees only packages no project uses',
+  'reason.browser_newest': 'newest version, tests use it',
+  'reason.browser_old': 'older version, the newest is {newest}',
   'answer_hint': 'Reply in chat with row numbers, for example 1, 3, 5-8',
 };
 

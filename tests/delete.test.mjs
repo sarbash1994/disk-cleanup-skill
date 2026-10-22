@@ -283,3 +283,92 @@ test('delete command prints per-id lines, freed bytes per group and free space; 
   assert.equal(await exists(path.join(temp, 'one')), false);
   assert.equal(await exists(path.join(temp, 'two', 'b.txt')), true);
 });
+
+// Fails only `git worktree remove` with the given stderr; every other command runs for real.
+const failRemove = (stderr) => async (cmd, args, opts) =>
+  (cmd === 'git' && args[0] === 'worktree' && args[1] === 'remove' ? {code: 128, stdout: '', stderr} : noGh(cmd, args, opts));
+
+test('a worktree remove that fails for another reason is reported failed and nothing is force-deleted', async () => {
+  const {repo} = await gitRepoWithOrigin();
+  const wt = await addWorktree(repo, 'feat/landed', {commit: true, mergeIntoMainAndPush: true});
+  const report = buildReport(await git.collect(later(), [repo]), [], {now: Date.now()});
+  const stderr = 'fatal: working trees containing submodules cannot be moved or removed\n';
+  const [result] = await deleteRows(report, [idOf(report, wt)], later({run: failRemove(stderr)}));
+  assert.equal(result.status, 'failed');
+  assert.match(result.message, /submodules cannot be moved or removed/);
+  assert.equal(result.freed, 0);
+  assert.equal(await exists(path.join(wt, 'feat-landed.txt')), true);
+  assert.match(gitOut(repo, 'worktree', 'list'), /feat-landed/);
+  assert.match(gitOut(repo, 'branch', '--list', 'feat/landed'), /feat\/landed/);
+});
+
+test('a worktree remove that fails on a long path falls back to removing the folder', async () => {
+  const {repo} = await gitRepoWithOrigin();
+  const wt = await addWorktree(repo, 'feat/landed', {commit: true, mergeIntoMainAndPush: true});
+  const report = buildReport(await git.collect(later(), [repo]), [], {now: Date.now()});
+  const stderr = "error: unable to unlink 'deep/x.js': Filename too long\n";
+  const [result] = await deleteRows(report, [idOf(report, wt)], later({run: failRemove(stderr)}));
+  assert.equal(result.status, 'deleted', result.message);
+  assert.equal(await exists(wt), false);
+  assert.doesNotMatch(gitOut(repo, 'worktree', 'list'), /feat-landed/, 'git worktree prune ran');
+  assert.equal(gitOut(repo, 'branch', '--list', 'feat/landed').trim(), '');
+});
+
+test('a worktree with submodules is skipped without trying to remove it', async () => {
+  const {repo} = await gitRepoWithOrigin();
+  const wt = await addWorktree(repo, 'feat/sub');
+  await writeTree(wt, {'.gitmodules': '[submodule "lib"]\n\tpath = lib\n\turl = ../lib.git\n'});
+  gitOut(wt, 'add', '-A');
+  gitOut(wt, 'commit', '-q', '-m', 'add submodule config');
+  gitOut(repo, 'merge', '-q', '--no-ff', '-m', 'merge feat/sub', 'feat/sub');
+  gitOut(repo, 'push', '-q', 'origin', 'main');
+  const report = buildReport(await git.collect(later(), [repo]), [], {now: Date.now()});
+  const id = idOf(report, wt);
+  assert.equal(report.groups[0].rows.find(r => r.id === id).tag, 'safe', 'fixture: safe in the report');
+  const calls = [];
+  const run = async (cmd, args, opts) => { calls.push(args.join(' ')); return noGh(cmd, args, opts); };
+  const [result] = await deleteRows(report, [id], later({run}));
+  assert.equal(result.status, 'skipped');
+  assert.match(result.message, /submodules/);
+  assert.equal(calls.some(c => c.startsWith('worktree remove')), false);
+  assert.equal(await exists(path.join(wt, '.gitmodules')), true);
+});
+
+test('a row whose path changed kind since the report is skipped', async () => {
+  const base = await tmpdir();
+  await writeTree(base, {'run.log/inner.txt': 'now a folder', 'cache': 'now a file'});
+  const log = path.join(base, 'run.log');
+  const cache = path.join(base, 'cache');
+  const report = buildReport([
+    rmRow(log, 'safe', {reason: {key: 'reason.git_loose_log', params: {}}}),
+    rmRow(cache, 'safe'),
+  ], [], {now: Date.now()});
+  const results = await deleteRows(report, [idOf(report, log), idOf(report, cache)], fakeCtx());
+  for (const r of results) {
+    assert.equal(r.status, 'skipped');
+    assert.match(r.message, /same kind/);
+  }
+  assert.equal(await exists(path.join(log, 'inner.txt')), true);
+  assert.equal(await exists(cache), true);
+});
+
+test('a loose log file row is deleted as a file', async () => {
+  const base = await tmpdir();
+  await writeTree(base, {'run.log': 'abcd'});
+  const log = path.join(base, 'run.log');
+  const report = buildReport([rmRow(log, 'safe', {reason: {key: 'reason.git_loose_log', params: {}}})], [], {now: Date.now()});
+  assert.deepEqual((await deleteRows(report, [1], fakeCtx()))[0], {id: 1, status: 'deleted', freed: 4, message: 'deleted'});
+  assert.equal(await exists(log), false);
+});
+
+test('paths differing only in case are different on Linux', async () => {
+  const base = await tmpdir();
+  await writeTree(base, {'dir/a.txt': 'a'});
+  const lower = path.join(base, 'dir');
+  const upper = path.join(base, 'Dir');
+  const report = buildReport([rmRow(upper, 'safe', {action: {type: 'rm', path: lower}})], [], {now: Date.now()});
+  // On a case-insensitive disk `Dir` exists; on Linux it does not. Either way the row must not delete `dir`.
+  const [result] = await deleteRows(report, [1], fakeCtx({platform: 'linux'}));
+  assert.equal(result.status, 'skipped');
+  assert.equal(await exists(path.join(lower, 'a.txt')), true);
+});

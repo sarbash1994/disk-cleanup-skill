@@ -47,6 +47,8 @@ export const EN = {
   'delete.missing': 'the path no longer exists',
   'delete.link': 'the path is a link; links are never followed or deleted',
   'delete.not_file_or_dir': 'the path is neither a file nor a folder',
+  'delete.kind_changed': 'the path is no longer the same kind of thing (file or folder) as in the report',
+  'delete.submodules': 'the worktree has submodules, which may hold their own commits and stashes; remove it by hand',
   'delete.changed': 'changed since the report: {reason}',
   'delete.not_worktree': 'no longer a git worktree',
   'delete.now_worktree': 'git now lists this folder as a worktree',

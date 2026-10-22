@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {EN, t} from './strings.mjs';
 import {measureSize} from './walk.mjs';
-import {agentDirRepo, checkOrphan, checkWorktree, isInside, isKnownWorktree, listWorktrees, repoContext} from './collect/git.mjs';
+import {agentDirRepo, checkOrphan, checkWorktree, isKnownWorktree, listWorktrees, repoContext} from './collect/git.mjs';
 import {checkAgentTemp} from './collect/agents.mjs';
 
 const MAX_IDS = 10_000;
@@ -36,7 +36,15 @@ export function parseIds(text) {
 
 const msg = (key, params) => t(EN, key, params);
 const outcome = (id, status, message, freed = 0) => ({id, status, freed, message});
-const samePath = (a, b) => isInside(a, b) && isInside(b, a);
+// Case folds only where the file system usually ignores case; on Linux Feat and feat are two folders.
+const foldsCase = (platform) => platform === 'win32' || platform === 'darwin';
+const exactPath = (a, b) => path.resolve(a) === path.resolve(b);
+const samePath = (a, b, platform) =>
+  exactPath(a, b) || (foldsCase(platform) && path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase());
+// Only loose logs are files; every other rm or worktree row is a folder.
+const kindOf = (row) => (row.reason?.key === 'reason.git_loose_log' ? 'file' : 'dir');
+// git fails on paths longer than the OS allows (MAX_PATH on Windows); only then is a direct removal the fallback.
+const LONG_PATH = /filename too long|name too long/i;
 // Fresh `safe` may go; fresh `ask` only when the user saw `ask` too; anything else changed under them.
 const stillDeletable = (fresh, seen) => fresh === 'safe' || (fresh === 'ask' && seen === 'ask');
 const changed = (check) => msg('delete.changed', {reason: msg(check.reasonKey, check.params)});
@@ -49,12 +57,15 @@ async function lstatOrNull(p) {
   }
 }
 
-/** Refusal message when `p` is missing, a symlink or junction, or neither a file nor a folder; null when it may go. */
-async function refusal(p) {
+/**
+ * Refusal message when `p` is missing, a symlink or junction, or no longer the expected kind
+ * (`'file'` or `'dir'`); null when it may go.
+ */
+async function refusal(p, kind) {
   const st = await lstatOrNull(p);
   if (!st) return msg('delete.missing');
   if (st.isSymbolicLink()) return msg('delete.link');
-  if (!st.isDirectory() && !st.isFile()) return msg('delete.not_file_or_dir');
+  if (kind === 'dir' ? !st.isDirectory() : !st.isFile()) return msg('delete.kind_changed');
   return null;
 }
 
@@ -68,8 +79,8 @@ async function sizeOf(p) {
 }
 
 /** Checks the path is still a real file or folder right before removing it; returns a refusal or null. */
-async function removePath(p) {
-  const refused = await refusal(p);
+async function removePath(p, kind) {
+  const refused = await refusal(p, kind);
   if (refused) return refused;
   await fs.rm(p, {recursive: true, force: false, maxRetries: 3});
   return null;
@@ -98,12 +109,13 @@ async function recheckRm(row, ctx) {
 
 async function deleteRm(row, ctx) {
   const p = row.action.path;
-  const refused = await refusal(p);
+  const kind = kindOf(row);
+  const refused = await refusal(p, kind);
   if (refused) return outcome(row.id, 'skipped', refused);
   const skip = await recheckRm(row, ctx);
   if (skip) return outcome(row.id, 'skipped', skip);
   const freed = await sizeOf(p);
-  const refusedNow = await removePath(p);
+  const refusedNow = await removePath(p, kind);
   if (refusedNow) return outcome(row.id, 'skipped', refusedNow);
   return outcome(row.id, 'deleted', msg('delete.deleted'), freed);
 }
@@ -125,8 +137,9 @@ async function recheckWorktree(row, opts, ctx) {
   const {repo, path: wtPath, branch} = row.action;
   const list = await listWorktrees(repo, ctx);
   if (!list) return {skip: msg('delete.git_failed')};
-  // The first entry is the main checkout, never a candidate.
-  const wt = list.slice(1).find((w) => samePath(w.path, wtPath));
+  // The first entry is the main checkout, never a candidate. An exact match wins over a case-folded one.
+  const linked = list.slice(1);
+  const wt = linked.find((w) => exactPath(w.path, wtPath)) ?? linked.find((w) => samePath(w.path, wtPath, ctx.platform));
   if (!wt) return {skip: msg('delete.not_worktree')};
   if ((wt.branch ?? null) !== (branch ?? null)) return {skip: msg('delete.branch_changed')};
   const check = await checkWorktree(repo, wt, opts, ctx);
@@ -135,9 +148,7 @@ async function recheckWorktree(row, opts, ctx) {
 }
 
 async function deleteWorktree(row, ctx, repoState) {
-  const {repo, path: wtPath} = row.action;
-  const refused = await refusal(wtPath);
-  if (refused) return outcome(row.id, 'skipped', refused);
+  const {repo} = row.action;
   const key = path.resolve(repo).toLowerCase();
   if (!repoState.has(key)) {
     // A failed fetch leaves older remote refs, which can only make fewer branches look landed.
@@ -149,14 +160,21 @@ async function deleteWorktree(row, ctx, repoState) {
 
   const first = await recheckWorktree(row, opts, ctx);
   if (first.skip) return outcome(row.id, 'skipped', first.skip);
+  // From here on only git's own path is used: for the check, the removal and the fallback.
   const {wt} = first;
-  const freed = await sizeOf(wtPath);
+  const refused = await refusal(wt.path, 'dir');
+  if (refused) return outcome(row.id, 'skipped', refused);
+  // Submodules hold their own commits and stashes under .git/worktrees/<id>/modules; git refuses them too.
+  if (await lstatOrNull(path.join(wt.path, '.gitmodules'))) return outcome(row.id, 'skipped', msg('delete.submodules'));
+  const freed = await sizeOf(wt.path);
   const removed = await ctx.run('git', ['worktree', 'remove', wt.path], {cwd: repo, timeoutMs: CMD_TIMEOUT_MS});
   if (removed.code !== 0) {
-    // Long paths on Windows can defeat git; one more clean check, then remove the folder directly.
+    const error = lastLine(removed.stderr) || msg('delete.cmd_exit', {code: removed.code});
+    if (!LONG_PATH.test(removed.stderr)) return outcome(row.id, 'failed', msg('delete.failed', {error}));
+    // Long paths on Windows defeat git; one more clean check, then remove the folder directly.
     const again = await recheckWorktree(row, opts, ctx);
     if (again.skip) return outcome(row.id, 'skipped', again.skip);
-    const refusedNow = await removePath(wtPath);
+    const refusedNow = await removePath(wt.path, 'dir');
     if (refusedNow) return outcome(row.id, 'skipped', refusedNow);
     await ctx.run('git', ['worktree', 'prune'], {cwd: repo});
   }
@@ -175,7 +193,7 @@ async function deleteOne(row, id, ctx, repoState) {
   if (row.path && !await lstatOrNull(row.path)) return outcome(id, 'skipped', msg('delete.missing'));
   if (action.type === 'cmd') return runCmd(row, ctx);
   // The folder deleted must be the one the user saw in the report.
-  if ((action.type === 'rm' || action.type === 'worktree') && row.path && action.path && samePath(row.path, action.path)) {
+  if ((action.type === 'rm' || action.type === 'worktree') && row.path && action.path && samePath(row.path, action.path, ctx.platform)) {
     return action.type === 'rm' ? deleteRm(row, ctx) : deleteWorktree(row, ctx, repoState);
   }
   return outcome(id, 'skipped', msg('delete.no_action'));
